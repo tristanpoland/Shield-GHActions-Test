@@ -104,6 +104,10 @@ jobs:
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
         run: |
+          wget https://go.dev/dl/go1.23.5.linux-arm64.tar.gz
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
+          go install github.com/onsi/ginkgo/v2/ginkgo
+          export PATH=$PATH:/usr/local/go/bin
           cd spec
           ginkgo -p .
 
