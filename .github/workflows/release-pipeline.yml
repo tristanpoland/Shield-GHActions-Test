@@ -82,7 +82,7 @@ jobs:
           sudo apt update && sudo apt install vault
           
           VERSION="${{ steps.version.outputs.new_version }}"
-          ./genesis compile-kit -v "$VERSION" -n "${{ env.KIT_NAME }}"
+          ./genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
           
       - uses: actions/upload-artifact@v4
         with:
