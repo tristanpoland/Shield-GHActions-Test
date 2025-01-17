@@ -112,6 +112,8 @@ jobs:
           wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
 
+          tar -xvf credhub-linux-amd64-2.9.41.tgz
+
           sudo mv ./safe-linux-amd64 /bin/safe
           sudo mv ./genesis /bin/genesis
           sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
