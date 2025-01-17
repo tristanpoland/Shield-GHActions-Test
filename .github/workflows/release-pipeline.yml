@@ -107,6 +107,7 @@ jobs:
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
           sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
+          export PATH=$PATH:~/go/bin
           cd spec
           ginkgo -p .
 
