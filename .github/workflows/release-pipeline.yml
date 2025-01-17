@@ -212,7 +212,7 @@ jobs:
           if [[ -n "$PREVIOUS_TAG" ]]; then
             echo "Comparing specs with previous release $PREVIOUS_TAG..."
             ls -lah
-            ./ci/scripts/compare-release-specs "$PREVIOUS_TAG" > "$results_file"
+            ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
             
             # Check if there are significant changes
             if ! grep -q "No Spec Changes to Consider" "$results_file"; then
