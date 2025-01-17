@@ -104,12 +104,15 @@ jobs:
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
         run: |
+          wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
           wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
 
           sudo mv ./safe-linux-amd64 /bin/safe
+          sudo mv ./genesis /bin/genesis
 
           chmod u+x /bin/safe
+          chmod u+x /bin/genesis
 
           wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
