@@ -1,0 +1,85 @@
+name: Setup Infrastructure
+description: Sets up infrastructure dependencies for deployment testing
+
+inputs:
+  iaas:
+    description: 'Infrastructure type (vsphere, aws, gcp, etc)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Dependencies
+      shell: bash
+      run: |
+        # Install common tools
+        sudo apt-get update
+        sudo apt-get install -y build-essential unzip jq
+        
+        # Install BOSH CLI
+        curl -Lo bosh https://github.com/cloudfoundry/bosh-cli/releases/latest/download/bosh-cli-linux-amd64
+        chmod +x bosh
+        sudo mv bosh /usr/local/bin/
+        
+        # Install Genesis
+        curl -Lo genesis https://github.com/genesis-community/genesis/releases/latest/download/genesis
+        chmod +x genesis
+        sudo mv genesis /usr/local/bin/
+        
+        # Install Spruce
+        curl -Lo spruce https://github.com/geofffranks/spruce/releases/latest/download/spruce-linux-amd64
+        chmod +x spruce
+        sudo mv spruce /usr/local/bin/
+        
+        # Install infrastructure-specific tools
+        case "${{ inputs.iaas }}" in
+          vsphere)
+            # VSphere specific setup
+            echo "Setting up VSphere tools..."
+            ;;
+          aws)
+            # AWS specific setup
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+            ;;
+          gcp)
+            # GCP specific setup
+            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+            curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+            sudo apt-get update && sudo apt-get install google-cloud-cli
+            ;;
+        esac
+
+    - name: Configure Credentials
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        VSPHERE_USERNAME: ${{ secrets.VSPHERE_USERNAME }}
+        VSPHERE_PASSWORD: ${{ secrets.VSPHERE_PASSWORD }}
+      run: |
+        case "${{ inputs.iaas }}" in
+          vsphere)
+            # Configure VSphere credentials
+            mkdir -p ~/.vsphere
+            echo "$VSPHERE_USERNAME" > ~/.vsphere/username
+            echo "$VSPHERE_PASSWORD" > ~/.vsphere/password
+            ;;
+          aws)
+            # Configure AWS credentials
+            mkdir -p ~/.aws
+            cat > ~/.aws/credentials << EOF
+        [default]
+        aws_access_key_id = $AWS_ACCESS_KEY_ID
+        aws_secret_access_key = $AWS_SECRET_ACCESS_KEY
+        EOF
+            ;;
+          gcp)
+            # Configure GCP credentials
+            echo "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/gcp-key.json
+            gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+            rm /tmp/gcp-key.json
+            ;;
+        esac

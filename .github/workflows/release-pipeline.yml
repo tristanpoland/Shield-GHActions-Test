@@ -1,0 +1,320 @@
+name: Release Pipeline
+
+on:
+  push:
+    branches: [develop, main]
+    paths-ignore: ['ci/**']
+  pull_request:
+    branches: [develop]
+    paths-ignore: ['ci/**']
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: false
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: 'patch'
+
+env:
+  KIT_NAME: vault # From meta.kit in settings.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  build-kit:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+          
+      - id: version
+        uses: ./.github/actions/version-manager
+        with:
+          bump_type: ${{ inputs.version_bump || 'patch' }}
+          
+      - name: Push version change
+        run: |
+          git push origin HEAD
+          git tag "v${{ steps.version.outputs.new_version }}"
+          git push origin "v${{ steps.version.outputs.new_version }}"
+          
+      - name: Build Kit
+        env:
+          GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
+          GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+          GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          BOSH_CLIENT: ${{ secrets.BOSH_CLIENT }}
+          BOSH_CLIENT_SECRET: ${{ secrets.BOSH_CLIENT_SECRET }}
+          BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
+          BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
+        run: |
+          wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
+          wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
+          wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
+          wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
+          wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
+
+          tar -xvf credhub-linux-amd64-2.9.41.tgz
+
+          sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
+          sudo mv ./credhub /bin/credhub
+          sudo mv ./safe-linux-amd64 /bin/safe
+          sudo mv ./spruce-linux-amd64 /bin/spruce
+
+          chmod u+x /bin/bosh
+          chmod u+x /bin/credhub
+          chmod u+x /bin/safe
+          chmod u+x /bin/spruce
+          chmod u+x ./genesis
+
+          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install vault
+          
+          VERSION="${{ steps.version.outputs.new_version }}"
+          ./genesis compile-kit -v "$VERSION" -n "${{ env.KIT_NAME }}"
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kit-build
+          path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
+
+  spec-tests:
+    needs: [build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Run Spec Tests
+        env:
+          GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
+          GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+          GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+        run: |
+          cd spec
+          ginkgo -p .
+
+  spec-check:
+    needs: [build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+          
+      - name: Get latest release tag
+        id: latest_tag
+        run: |
+          git fetch --tags
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+          
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Check Specs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+        run: |
+          # Create output directory
+          mkdir -p spec-check
+          
+          # Get the previous release for comparison
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git checkout $PREVIOUS_TAG
+            # Store the old specs
+            cp -r spec/results ./spec-check/old-specs
+            git checkout -
+          fi
+          
+          # Run spec tests to generate new specs
+          cd spec
+          ginkgo -p .
+          cd ..
+          
+          # Generate the spec comparison
+          results_file="spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "Comparing specs with previous release $PREVIOUS_TAG..."
+            ./ci/scripts/compare-release-specs "$PREVIOUS_TAG" > "$results_file"
+            
+            # Check if there are significant changes
+            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
+              echo "::warning ::Detected spec changes that may impact users"
+            fi
+          else
+            echo "No previous release found - this appears to be the first release"
+            echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
+          
+      - name: Convert Spec Diffs to HTML
+        if: success()
+        run: |
+          # Install aha for ANSI to HTML conversion if needed
+          sudo apt-get update && sudo apt-get install -y aha
+          
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ]; then
+              cat "$diff" | aha > "${diff}.html"
+            fi
+          done
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-diffs
+          path: |
+            spec-check/diff-*
+            spec-check/*.html
+
+      - name: Check for Breaking Changes
+        if: success()
+        run: |
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
+              echo "::notice ::Spec changes detected - please review the changes"
+              exit 0
+            fi
+          done
+          
+      - name: Convert Spec Diffs to HTML
+        if: success()
+        run: |
+          # Install aha for ANSI to HTML conversion if needed
+          sudo apt-get update && sudo apt-get install -y aha
+          
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ]; then
+              cat "$diff" | aha > "${diff}.html"
+            fi
+          done
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-diffs
+          path: |
+            spec-check/diff-*
+            spec-check/*.html
+
+      - name: Check for Breaking Changes
+        if: success()
+        run: |
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
+              echo "::notice ::Spec changes detected - please review the changes"
+              exit 0
+            fi
+          done
+
+  deploy:
+    needs: [spec-tests, spec-check]
+    runs-on: ubuntu-latest
+    environment: ci-testing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Set up Infrastructure
+        uses: ./.github/actions/setup-infra
+        with:
+          iaas: vsphere
+          
+      - name: Deploy and Test
+        env:
+          DEPLOY_ENV: ci-vsphere-baseline
+          GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
+          GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+          GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          BOSH_CLIENT: ${{ secrets.BOSH_CLIENT }}
+          BOSH_CLIENT_SECRET: ${{ secrets.BOSH_CLIENT_SECRET }}
+          BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
+          BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
+          SECRETS_SEED_DATA: ${{ secrets.SECRETS_SEED_DATA }}
+        run: |
+          ./ci/scripts/test-deployment
+
+  prepare-release:
+    if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
+    needs: [deploy, build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: spec-diffs
+          
+      - name: Generate Release Notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./ci/scripts/generate-release-notes \
+            "${{ needs.build-kit.outputs.version }}" \
+            "$(pwd)" \
+            "${{ github.workspace }}/previous-tag" \
+            "release-notes.md"
+            
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: release/${{ needs.build-kit.outputs.version }}
+          title: Release v${{ needs.build-kit.outputs.version }}
+          body: |
+            Release preparation for version ${{ needs.build-kit.outputs.version }}
+            
+            Generated release notes and spec diffs attached.
+          labels: release
+          base: main
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy, build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Download Spec Diffs
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-diffs
+          path: spec-diffs
+          
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.build-kit.outputs.version }}
+          name: v${{ needs.build-kit.outputs.version }}
+          body_path: release-notes/release-notes.md
+          files: |
+            *.tar.gz
+            spec-diffs/*
+          prerelease: false
+          
+      - name: Notify Success
+        if: success()
+        uses: ./.github/actions/notify
+        with:
+          message: "Successfully released v${{ needs.build-kit.outputs.version }}"
+          status: success

@@ -1,0 +1,84 @@
+spec-check:
+    needs: [build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+          
+      - name: Get latest release tag
+        id: latest_tag
+        run: |
+          git fetch --tags
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+          
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Check Specs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+        run: |
+          # Create output directory
+          mkdir -p spec-check
+          
+          # Get the previous release for comparison
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git checkout $PREVIOUS_TAG
+            # Store the old specs
+            cp -r spec/results ./spec-check/old-specs
+            git checkout -
+          fi
+          
+          # Run spec tests to generate new specs
+          cd spec
+          ginkgo -p .
+          cd ..
+          
+          # Generate the spec comparison
+          results_file="spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "Comparing specs with previous release $PREVIOUS_TAG..."
+            ./ci/scripts/compare-release-specs "$PREVIOUS_TAG" > "$results_file"
+            
+            # Check if there are significant changes
+            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
+              echo "::warning ::Detected spec changes that may impact users"
+            fi
+          else
+            echo "No previous release found - this appears to be the first release"
+            echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
+          
+      - name: Convert Spec Diffs to HTML
+        if: success()
+        run: |
+          # Install aha for ANSI to HTML conversion if needed
+          sudo apt-get update && sudo apt-get install -y aha
+          
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ]; then
+              cat "$diff" | aha > "${diff}.html"
+            fi
+          done
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-diffs
+          path: |
+            spec-check/diff-*
+            spec-check/*.html
+
+      - name: Check for Breaking Changes
+        if: success()
+        run: |
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
+              echo "::notice ::Spec changes detected - please review the changes"
+              exit 0
+            fi
+          done

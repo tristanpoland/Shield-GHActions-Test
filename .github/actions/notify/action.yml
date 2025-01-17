@@ -1,0 +1,43 @@
+name: Notify
+description: Sends notifications about pipeline status
+
+inputs:
+  message:
+    description: 'Notification message'
+    required: true
+  status:
+    description: 'Status (success/failure)'
+    required: true
+    default: 'success'
+  url:
+    description: 'URL to include in notification'
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Send Notification
+      shell: bash
+      env:
+        SHOUT_URL: ${{ secrets.SHOUT_URL }}
+        SHOUT_USER: ${{ secrets.SHOUT_USERNAME }}
+        SHOUT_PASS: ${{ secrets.SHOUT_PASSWORD }}
+      run: |
+        if [[ -n "$SHOUT_URL" ]]; then
+          STATUS_ICON=""
+          if [[ "${{ inputs.status }}" == "success" ]]; then
+            STATUS_ICON="✅"
+          else
+            STATUS_ICON="❌"
+          fi
+          
+          MESSAGE="${STATUS_ICON} ${{ inputs.message }}"
+          if [[ -n "${{ inputs.url }}" ]]; then
+            MESSAGE+=" ${{ inputs.url }}"
+          fi
+          
+          curl -X POST "${SHOUT_URL}" \
+            -u "${SHOUT_USER}:${SHOUT_PASS}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"${MESSAGE}\", \"topic\": \"${GITHUB_REPOSITORY##*/}-pipeline\"}"
+        fi
