@@ -235,13 +235,6 @@ jobs:
               cat "$diff" | aha > "${diff}.html"
             fi
           done
-          
-      - uses: actions/upload-artifact@v4
-        with:
-          name: spec-diffs
-          path: |
-            spec-check/diff-*
-            spec-check/*.html
 
       - name: Check for Breaking Changes
         if: success()
@@ -264,23 +257,12 @@ jobs:
               cat "$diff" | aha > "${diff}.html"
             fi
           done
-          
       - uses: actions/upload-artifact@v4
         with:
           name: spec-diffs
           path: |
             spec-check/diff-*
             spec-check/*.html
-
-      - name: Check for Breaking Changes
-        if: success()
-        run: |
-          for diff in spec-check/diff-*; do
-            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
-              echo "::notice ::Spec changes detected - please review the changes"
-              exit 0
-            fi
-          done
 
   deploy:
     needs: [spec-tests, spec-check]
