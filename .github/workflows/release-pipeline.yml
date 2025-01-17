@@ -68,7 +68,7 @@ jobs:
 
           sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
           sudo mv ./credhub /bin/credhub
-          sudo mv ./safe-linux-amd64 /bin/safe
+          sudo cp ./safe-linux-amd64 /tmp/safe
           sudo mv ./spruce-linux-amd64 /bin/spruce
 
           chmod u+x /bin/bosh
