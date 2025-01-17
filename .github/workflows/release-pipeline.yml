@@ -20,7 +20,7 @@ on:
         default: 'patch'
 
 env:
-  KIT_NAME: vault # From meta.kit in settings.yml
+  KIT_NAME: shield # From meta.kit in settings.yml
 
 permissions:
   contents: write
