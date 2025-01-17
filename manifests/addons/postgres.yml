@@ -1,0 +1,9 @@
+---
+params:
+  postgres-addon-version: (( param "Please specify the version of the Postgres addon.  Expecting one of 9.0, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 10, 11" ))
+
+instance_groups:
+- name: shield
+  jobs:
+  - name:    (( concat "shield-addon-postgres-" params.postgres-addon-version ))
+    release: shield-addon-postgres

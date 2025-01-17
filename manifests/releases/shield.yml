@@ -1,0 +1,6 @@
+releases:
+- name:    shield
+  version: 9.2.0
+  url:     https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  sha1:   3b59c76585efcf7dd32749b3e96c42544886dd72
+

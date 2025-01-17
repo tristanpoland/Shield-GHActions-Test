@@ -1,0 +1,89 @@
+---
+params:
+  admin_username:   (( grab meta.shield.admin.username ))
+  external_domain:  (( grab meta.shield.domain ))
+
+  # These two required by `check`:
+  shield_static_ip: (( grab meta.shield.ip ))
+  external_domain: (( grab params.shield_static_ip ))
+
+exodus:
+  ca_cert:        (( grab meta.shield.ca ))
+  pubkey:         (( grab meta.shield.agent.pub ))
+  domain:         (( grab meta.shield.domain )) 
+  agent_ip:       (( grab meta.shield.ip )) 
+  dashboard_url:  (( concat "https://" meta.shield.domain )) 
+  api_url:        (( concat "https://" meta.shield.domain )) 
+  admin_username: (( grab meta.shield.admin.username ))
+  admin_password: (( grab meta.shield.admin.password ))
+
+instance_groups:
+  - name: shield
+    persistent_disk_type: (( concat "shield-" meta.ocfp.env.scale ))
+    instances: 1
+    azs:
+      - (( grab meta.shield.az ))
+
+    persistent_disk_type: (( grab meta.shield.disk_type ))
+    vm_type:              (( grab meta.shield.vm_type ))
+
+    stemcell: default
+
+    networks:
+      - (( replace ))
+      - name: (( grab meta.shield.network ))
+        static_ips:
+          - (( grab meta.shield.ip ))
+
+    vm_extensions:
+      - ((replace))
+      - shield-lb
+
+    jobs:
+      - name: shield-agent
+        release: shield
+        consumes:
+          shield: { from: shield }
+        properties:
+          core:
+            ca: (( grab meta.shield.ca ))
+          env:
+            http_proxy:  (( grab params.http_proxy  || "" ))
+            https_proxy: (( grab params.https_proxy || "" ))
+            no_proxy:    (( grab params.no_proxy    || "" ))
+
+      - name: core
+        release: shield
+        provides:
+          shield: { shared: true, as: shield }
+        properties:
+          require-shield-core: true
+          domain: (( grab meta.shield.ip )) # Q: Could this be meta.shield.domain?
+          agent:
+            key: (( grab meta.shield.agent.key ))
+          tls:
+            certificate: (( grab meta.shield.server.cert ))
+            key:         (( grab meta.shield.server.key )) 
+          vault:
+            tls:
+              ca:          (( grab meta.shield.vault.ca ))
+              certificate: (( grab meta.shield.vault.cert ))
+              key:         (( grab meta.shield.vault.key ))
+          core:
+            env: (( grab meta.shield.core.name ))
+          failsafe:
+            username: (( grab meta.shield.admin.username ))
+            password: (( grab meta.shield.admin.password ))
+
+update:
+  canaries: 0
+  max_in_flight: 1
+  serial: true
+  canary_watch_time: 1000-300000
+  update_watch_time: 1000-300000
+
+stemcells:
+- alias:   (( grab meta.stemcell.name ))
+  os:      (( grab meta.stemcell.os   ))
+  version: (( grab meta.stemcell.version ))
+

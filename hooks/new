@@ -1,0 +1,50 @@
+#!/bin/bash
+set -eu
+
+ip= # assigned below with prompt_for
+prompt_for ip line \
+	'What IP address would you like to deploy SHIELD on?'
+
+external_domain= # assugbed below with prompt_for
+prompt_for external_domain line \
+  'What domain name would you like to use? (leave blank to just use IP)' \
+  --default ''
+
+isoauth= # assigned below with prompt_for
+prompt_for isoauth boolean -i --default 'false' \
+	'Would you like to authenticate against an OAuth2 endpoint (Github / UAA)? [y|N]'
+
+secure=
+prompt_for secure boolean -i  --default  'true' \
+  'Would you like to secure the admin user with a generated password and optional username? [Y|n]'
+
+username='admin'
+if $secure ; then
+  prompt_for username line -i --default $username \
+    'Admin username:'
+fi
+
+(
+echo "---"
+echo "kit:"
+echo "  name:    $GENESIS_KIT_NAME"
+echo "  version: $GENESIS_KIT_VERSION"
+if $isoauth || $secure; then
+	echo "  features:"
+  $isoauth && echo "    - oauth"
+  $secure && echo "    - secure"
+else
+	echo "  features: []"
+fi
+echo ""
+genesis_config_block
+
+echo "params:"
+echo "  shield_static_ip: $ip"
+if [[ -n "$external_domain" ]] ; then
+  echo "  external_domain: $external_domain"
+fi
+if [[ "$username" != "admin" ]] ; then
+  echo "  admin_username: $username"
+fi
+) > "$GENESIS_ROOT/$GENESIS_ENVIRONMENT.yml"

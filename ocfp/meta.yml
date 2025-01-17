@@ -1,0 +1,51 @@
+---
+meta:
+  ocfp:
+    env:
+      scale: (( grab params.ocfp_env_scale || "dev" ))
+
+    vault:
+      tf: (( concat genesis.secrets_mount "tf/" genesis.vault_env ))
+
+    certs:
+      trusted:
+        - (( vault genesis.secrets_mount "certs/org:ca" )) # Organization CA, if exists
+        - (( vault genesis.secrets_mount "certs/dbs:ca" )) # External Databases CA
+
+  stemcell:
+    name:    (( grab params.stemcell_name    || "default" ))
+    os:      (( grab params.stemcell_os      || "ubuntu-jammy" ))
+    version: (( grab params.stemcell_version || "latest" ))
+
+  shield:
+    ip:     (( vault meta.ocfp.vault.tf "/bosh/iaas/subnets/ocfp/0/ips/ocf/reserved:shield_ip" ))
+    az:     (( concat genesis.env "-z1" ))
+    domain: (( vault meta.ocfp.vault.tf "/ocf/fqdns:shield" ))
+    ca:     (( vault meta.vault         "/certs/ca:certificate" ))
+
+    admin:
+      username: (( vault meta.ocfp.vault.tf "/shield/admin:username" ))
+      password: (( vault meta.ocfp.vault.tf "/shield/admin:password" ))
+
+
+    url:        (( concat "https://" meta.shield.domain ))
+    disk_type:  (( concat "shield-" meta.ocfp.env.scale ))
+    vm_type:    (( concat "shield-" meta.ocfp.env.scale ))
+    network:    (( concat genesis.env "-shield" ))
+
+    agent:
+      pub:      (( vault meta.vault "/agent:public" ))
+      key:      (( vault meta.vault "/agent:private" ))
+
+    server:
+      cert:     (( vault meta.vault "/certs/server:certificate" ))
+      key:      (( vault meta.vault "/certs/server:key" ))
+
+    vault:
+      ca:       (( vault meta.vault "/vault/ca:certificate" ))
+      cert:     (( vault meta.vault "/vault/server:certificate" ))
+      key:      (( vault meta.vault "/vault/server:key" ))
+
+    core:
+      name: (( concat genesis.env "-shield" ))
+

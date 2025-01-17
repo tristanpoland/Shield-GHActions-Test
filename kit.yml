@@ -1,0 +1,37 @@
+---
+name: shield
+version: 1.9.0
+
+description:   S.H.I.E.L.D. Data Protection
+author: James Hunt <jhunt@starkandwayne.com>
+docs:   https://shieldproject.io/genesis
+code:   https://github.com/genesis-community/shield-genesis-kit
+
+genesis_version_min: 2.7.6
+
+certificates:
+  base:
+    certs:
+      ca:
+        valid_for: ${params.ca_validity_period}
+      server:
+        valid_for: ${params.cert_validity_period}
+        names:
+          - 127.0.0.1
+          - "${params.shield_static_ip}"
+          - "${params.external_domain}"
+    vault:
+      ca:
+        valid_for: ${params.ca_validity_period}
+      server:
+        valid_for: ${params.cert_validity_period}
+        names:
+          - 127.0.0.1
+
+credentials:
+  base:
+    agent: ssh 2048 fixed
+
+  secure:
+    failsafe:
+      admin_password: random 24

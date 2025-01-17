@@ -1,0 +1,11 @@
+---
+params:
+  authentication: (( param "A SHIELD OAuth specification for configuring auth providers that maps tenants and roles" ))
+
+instance_groups:
+  - name: shield
+    jobs:
+      - name: core
+        properties:
+          core:
+            authentication: (( grab params.authentication ))

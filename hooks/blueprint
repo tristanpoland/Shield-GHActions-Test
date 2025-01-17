@@ -1,0 +1,60 @@
+#!/bin/bash
+
+set -eu
+
+declare -a merge opsfiles
+opsfiles=()
+ops_var='merge'
+want_feature "ocfp" && ops_var="opsfiles"
+
+for want in ${GENESIS_REQUESTED_FEATURES}
+do
+  case ${want} in
+    (ocfp|oauth|oauth-provider|proxy|postgres-addon|secure|okta)
+      true
+      ;;
+    (*)
+      if [[ -f "$GENESIS_ROOT/ops/$want.yml" ]]
+      then eval "$ops_var+=( \"$GENESIS_ROOT/ops/$want.yml\" )"
+      else echo "ERROR: Unsupported feature: ${want}" ; exit 1
+      fi
+      ;;
+  esac
+done
+
+merge=( 
+  "manifests/shield.yml"
+  "manifests/releases/shield.yml"
+)
+
+want_feature postgres-addon && merge+=( 
+  "manifests/addons/postgres.yml"
+  "manifests/releases/shield-addon-postgres.yml"
+)
+
+want_feature okta   && merge+=( "manifests/addons/okta.yml" )
+want_feature secure && merge+=( "manifests/addons/secure.yml" )
+want_feature oauth  && merge+=( "manifests/oauth.yml" )
+
+if want_feature oauth-provider
+then
+  echo >&2 "The oauth-provider feature flag is now just called 'oauth'."
+  merge+=( "manifests/oauth.yml" )
+fi
+
+if want_feature proxy
+then
+  echo >&2 "You no longer need to explicitly specify the 'proxy' feature."
+  echo >&2 "If you remove it, everything will still work as expected."
+fi
+
+# ocfp feature overide everything except opsfiles.
+want_feature ocfp && merge+=( 
+  "ocfp/meta.yml"
+  "ocfp/ocfp.yml"
+)
+
+echo "${merge[@]}"
+if (( ${#opsfiles[@]} > 0 ))
+then echo "${opsfiles[@]}"
+fi

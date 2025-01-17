@@ -1,0 +1,12 @@
+---
+kit:
+  features:
+  - oauth
+
+genesis:
+  env:   oauth
+
+params:
+  shield_static_ip: 10.99.0.16
+  installation:     S.H.I.E.L.D. CI/CD
+  authentication: test-auth

@@ -1,0 +1,28 @@
+---
+instance_groups:
+  - name: shield
+    jobs:
+      - name: core
+        properties:
+          core:
+            authentication:
+            - identifier: okta # or whatever you used when registering
+              name:       Okta
+              backend:    okta
+              properties:
+                client_id:            (( vault meta.vault "/okta:client_id" ))
+                client_secret:        (( vault meta.vault "/okta:client_secret" ))
+                # NOTE: domain + auth_server === issuer
+                okta_domain:          (( vault meta.vault "/okta:domain" ))
+                authorization_server: (( vault meta.vault "/okta:auth_server" ))
+                deployment_uri:       (( grab exodus.api_url )) # SHIELD-DEPLOYMENT-URL
+                mapping:  
+                - okta: okta
+                  tenant: Default Tenant
+                  rights:
+                    - { group: Admin, role: admin }
+                    - { group: User , role: engineer }
+                    - { group: Everyone, role: operator }
+                    - { role: operator }
+
+        

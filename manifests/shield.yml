@@ -1,0 +1,69 @@
+---
+params:
+  external_domain: (( grab params.shield_static_ip ))
+  ca_validity_period: 10y
+  cert_validity_period: 1y
+
+exodus:
+  url:          (( concat "https://" params.external_domain ))
+  ca_cert:      (( vault meta.vault "/certs/ca:certificate" ))
+  pubkey:       (( vault meta.vault "/agent:public" ))
+  admin_username: "admin"
+  admin_password: "shield"
+
+instance_groups:
+  - name: shield
+    instances: 1
+    azs: [(( grab params.availability_zone || "z1" ))]
+    persistent_disk_type: (( grab params.shield_disk_type || params.shield_disk_pool || "shield" ))
+    vm_type:              (( grab params.shield_vm_type   || "small"  ))
+    stemcell: bionic
+    networks:
+      - name: (( grab params.shield_network || "shield" ))
+        static_ips:
+          - (( grab params.shield_static_ip ))
+
+    jobs:
+      - name: shield-agent
+        release: shield
+        consumes:
+          shield: {from: shield}
+        properties:
+          core:
+            ca: (( vault meta.vault "/certs/ca:certificate" ))
+          env:
+            http_proxy:  (( grab params.http_proxy  || "" ))
+            https_proxy: (( grab params.https_proxy || "" ))
+            no_proxy:    (( grab params.no_proxy    || "" ))
+
+      - name: core
+        release: shield
+        provides:
+          shield: { shared: true, as: shield }
+        properties:
+          require-shield-core: true
+          domain: (( grab params.shield_static_ip ))
+          agent:
+            key: (( vault meta.vault "/agent:private" ))
+          tls:
+            certificate: (( vault meta.vault "/certs/server:certificate" ))
+            key:         (( vault meta.vault "/certs/server:key" ))
+          vault:
+            tls:
+              ca:          (( vault meta.vault "/vault/ca:certificate" ))
+              certificate: (( vault meta.vault "/vault/server:certificate" ))
+              key:         (( vault meta.vault "/vault/server:key" ))
+          core:
+            env: (( grab params.installation || "S.H.I.E.L.D." ))
+
+update:
+  canaries: 0
+  max_in_flight: 1
+  serial: true
+  canary_watch_time: 1000-300000
+  update_watch_time: 1000-300000
+
+stemcells:
+- alias:   bionic
+  os:      (( grab params.stemcell_os      || "ubuntu-jammy" ))
+  version: (( grab params.stemcell_version || "latest" ))

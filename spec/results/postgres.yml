@@ -1,0 +1,78 @@
+exodus:
+  admin_password: shield
+  admin_username: admin
+  bosh: postgres
+  ca_cert: <!{meta.vault}/certs/ca:certificate!>
+  features: postgres-addon
+  is_director: false
+  pubkey: <!{meta.vault}/agent:public!>
+  url: https://10.99.0.16
+  use_create_env: false
+instance_groups:
+- azs:
+  - z1
+  instances: 1
+  jobs:
+  - consumes:
+      shield:
+        from: shield
+    name: shield-agent
+    properties:
+      core:
+        ca: <!{meta.vault}/certs/ca:certificate!>
+      env:
+        http_proxy: ""
+        https_proxy: ""
+        no_proxy: ""
+    release: shield
+  - name: core
+    properties:
+      agent:
+        key: <!{meta.vault}/agent:private!>
+      core:
+        env: S.H.I.E.L.D. CI/CD
+      domain: 10.99.0.16
+      require-shield-core: true
+      tls:
+        certificate: <!{meta.vault}/certs/server:certificate!>
+        key: <!{meta.vault}/certs/server:key!>
+      vault:
+        tls:
+          ca: <!{meta.vault}/vault/ca:certificate!>
+          certificate: <!{meta.vault}/vault/server:certificate!>
+          key: <!{meta.vault}/vault/server:key!>
+    provides:
+      shield:
+        as: shield
+        shared: true
+    release: shield
+  - name: shield-addon-postgres-11
+    release: shield-addon-postgres
+  name: shield
+  networks:
+  - name: shield
+    static_ips:
+    - 10.99.0.16
+  persistent_disk_type: shield
+  stemcell: bionic
+  vm_type: small
+name: postgres-shield
+releases:
+- name: shield
+  sha1: 3b59c76585efcf7dd32749b3e96c42544886dd72
+  url: https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  version: 9.2.0
+- name: shield-addon-postgres
+  sha1: 45fb8d0c4919c55667cb18ee17e5e333a5eb5789
+  url: https://github.com/shieldproject/shield-addon-postgres-boshrelease/releases/download/v1.0.2/shield-addon-postgres-1.0.2.tgz
+  version: 1.0.2
+stemcells:
+- alias: bionic
+  os: ubuntu-jammy
+  version: latest
+update:
+  canaries: 0
+  canary_watch_time: 1000-300000
+  max_in_flight: 1
+  serial: true
+  update_watch_time: 1000-300000

@@ -1,0 +1,12 @@
+---
+kit:
+  features:
+  - secure
+
+genesis:
+  env:   secure
+
+params:
+  shield_static_ip: 10.99.0.16
+  installation:     S.H.I.E.L.D. CI/CD
+  admin_username:   superuser

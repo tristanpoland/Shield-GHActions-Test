@@ -1,0 +1,157 @@
+#!/bin/bash
+set -u
+#Version check
+min_version="2.7.0"
+genesis_version="$(genesis -v 2>&1 | grep '^Genesis v' | sed -e 's/Genesis v\(.*\) (.*$/\1/')"
+if ! [[ "$genesis_version" =~ -dev$ ]] && ! new_enough "$genesis_version" "$min_version" ; then
+  describe >&2 "" "#R{[ERROR]} This kit needs Genesis $min_version.  Please upgrade before continuing" ""
+  exit 1
+fi
+set -e
+
+# TODO: This should all be using exodus data, not vault and deployed manifest data
+
+was_deployed() {
+  test -f "${GENESIS_ROOT}/.genesis/manifest/${GENESIS_ENVIRONMENT}.yml"
+}
+
+shield_version() {
+  if ! was_deployed; then
+    bail "" \
+      "#R{[ERROR]} No deployment found.  Please run deploy on this environment before" \
+      "        running any addons"
+  fi
+  lookup --deployed "releases[name=shield].version"
+}
+
+ip() {
+  if ! was_deployed; then
+    bail "" \
+      "#R{[ERROR]} No deployment found.  Please run deploy on this environment before" \
+      "        running any addons"
+  fi
+  lookup --deployed "params.shield_static_ip"
+}
+
+
+list() {
+  describe "$(cat <<EOF
+
+The following addons are defined for the #C{$GENESIS_KIT_ID} kit:
+
+  #G{visit}            Open the SHIELD Web Interface in your browser
+                   (requires macOS)
+
+  #G{runtime-config}   [shortcut: #G{rc}] Print out a BOSH runtime-config for setting
+                   up SHIELD agent as an add-on.
+
+                   If you keep and check in the runtime config file into your
+                   version control repository, you will want to use the
+                   #y{--vaultify} option.  This improves security by keeping
+                   secrets as (( vault )) operations, but requires piping
+                   through spruce before pushing changes to BOSH.
+
+                   To automatically merge these changes to your runtime-config
+                   file, do the following (please note, any order or comment in
+                   this file will not be maintained -- manually add the output
+                   of this command to your rc file if you wish to preserve
+                   these):
+                     #G{$GENESIS_CALL do "$GENESIS_ENVIRONMENT" -- rc --vaultify | \\
+                       spruce merge --skip-eval }#Gi{<rc-file>}#G{ - > }#Gi{<new-rc-file>}
+
+                   To upload changes to BOSH:
+                     #G{$GENESIS_BOSH_COMMAND -e "${BOSH_ALIAS:-${GENESIS_BOSH_ENVIRONMENT:-${BOSH_ENVIRONMENT:-$GENESIS_ENVIRONMENT}}}" urc <(spruce merge }#Gi{<new-rc-file>}#G{)}
+EOF
+)" ""
+}
+
+case $GENESIS_ADDON_SCRIPT in
+list)
+  list
+  exit 0
+  ;;
+
+visit)
+  if ! command -v open >/dev/null 2>&1; then
+    echo "The 'visit' addon script only works on macOS, currently."
+    exit 1
+  fi
+  open "https://$(ip)"
+  ;;
+
+runtime-config|rc)
+
+
+  vaultify=''
+  if [[ ${#@} -gt 1 ]] ; then
+    echo "Too many arguments.  Usage: '$GENESIS_ADDON_SCRIPT [--vaultify]'"
+    exit 1
+  elif [[ ${#@} -eq 1 ]] ; then
+    if [[ $1 == "--vaultify" ]] ; then
+      vaultify=1
+    else
+      echo "Unknown argument $1.  Usage: '$GENESIS_ADDON_SCRIPT [--vaultify]'"
+      exit 1
+    fi
+  fi
+
+  cat <<EOF
+releases:
+  - name:    shield
+    version: $(shield_version)
+
+meta:
+  vault: "${GENESIS_SECRETS_BASE}"
+
+addons:
+  - name: shield-agent
+    jobs:
+      - name:    shield-agent
+        release: shield
+        properties:
+          shield-url: https://$(ip)
+          require-shield-core: false
+
+          core:
+EOF
+if [[ -n "$vaultify" ]] ; then
+  cat <<EOF
+            ca: (( vault meta.vault "certs/ca:certificate" ))
+EOF
+else
+  cat <<EOF
+            ca: |
+EOF
+  safe read "${GENESIS_SECRETS_BASE}certs/ca:certificate" | sed -e 's/^/              /'
+fi
+  cat <<EOF
+
+          agent:
+EOF
+if [[ -n "$vaultify" ]] ; then
+  cat <<EOF
+            key: (( vault meta.vault "agent:public" ))
+EOF
+else
+  cat <<EOF
+
+            key: |
+EOF
+  safe read "${GENESIS_SECRETS_BASE}agent:public" | sed -e 's/^/              /'
+fi
+  cat <<EOF
+
+          env:
+            http_proxy:  "$(lookup params.http_proxy)"
+            https_proxy: "$(lookup params.https_proxy)"
+            no_proxy:    "$(lookup params.no_proxy)"
+
+EOF
+  ;;
+
+*)
+  echo "Unrecognized SHIELD Genesis Kit addon."
+  list
+  exit 1
+  ;;
+esac

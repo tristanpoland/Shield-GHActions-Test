@@ -1,0 +1,7 @@
+- type: replace
+  path: /releases?/name=shield-addon-postgres?
+  value:
+    name: shield-addon-postgres
+    version: 1.0.2
+    url:     https://github.com/shieldproject/shield-addon-postgres-boshrelease/releases/download/v1.0.2/shield-addon-postgres-1.0.2.tgz
+    sha1:    45fb8d0c4919c55667cb18ee17e5e333a5eb5789

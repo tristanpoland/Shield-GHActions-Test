@@ -1,0 +1,24 @@
+secret/oauth/shield/agent:
+  fingerprint: <!{meta.vault}/agent:fingerprint!>
+  private: <!{meta.vault}/agent:private!>
+  public: <!{meta.vault}/agent:public!>
+secret/oauth/shield/certs/ca:
+  certificate: <!{meta.vault}/certs/ca:certificate!>
+  combined: <!{meta.vault}/certs/ca:combined!>
+  crl: <!{meta.vault}/certs/ca:crl!>
+  key: <!{meta.vault}/certs/ca:key!>
+  serial: <!{meta.vault}/certs/ca:serial!>
+secret/oauth/shield/certs/server:
+  certificate: <!{meta.vault}/certs/server:certificate!>
+  combined: <!{meta.vault}/certs/server:combined!>
+  key: <!{meta.vault}/certs/server:key!>
+secret/oauth/shield/vault/ca:
+  certificate: <!{meta.vault}/vault/ca:certificate!>
+  combined: <!{meta.vault}/vault/ca:combined!>
+  crl: <!{meta.vault}/vault/ca:crl!>
+  key: <!{meta.vault}/vault/ca:key!>
+  serial: <!{meta.vault}/vault/ca:serial!>
+secret/oauth/shield/vault/server:
+  certificate: <!{meta.vault}/vault/server:certificate!>
+  combined: <!{meta.vault}/vault/server:combined!>
+  key: <!{meta.vault}/vault/server:key!>
