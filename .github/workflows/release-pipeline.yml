@@ -107,9 +107,9 @@ jobs:
           wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
 
-          chmod u+x /bin/safe
-
           sudo mv ./safe-linux-amd64 /bin/safe
+
+          chmod u+x /bin/safe
           
           sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
