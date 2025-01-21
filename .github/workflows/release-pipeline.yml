@@ -311,7 +311,7 @@ jobs:
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
           SECRETS_SEED_DATA: ${{ secrets.SECRETS_SEED_DATA }}
         run: |
-          ./ci/scripts/test-deployment
+          ./ci/scripts/test-deployment.sh
 
   # Job: Prepare release (only on develop branch)
   prepare-release:
