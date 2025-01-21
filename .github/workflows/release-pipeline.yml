@@ -119,7 +119,7 @@ jobs:
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
         run: |
-          sudo chmod -R a+rwx ./ci/scripts/*
+          sudo chmod -R a+rwx ./**
           # Install Go and required tools
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
           wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
@@ -182,7 +182,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
         run: |
-          sudo chmod -R a+rwx ./ci/scripts/*
+          sudo chmod -R a+rwx ./*
           # Install required tools
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
           wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
@@ -313,7 +313,7 @@ jobs:
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
           SECRETS_SEED_DATA: ${{ secrets.SECRETS_SEED_DATA }}
         run: |
-          sudo chmod -R a+rwx ./ci/scripts/*
+          sudo chmod -R a+rwx ./**
           ./ci/scripts/test-deployment.sh
 
   # Job: Prepare release (only on develop branch)
