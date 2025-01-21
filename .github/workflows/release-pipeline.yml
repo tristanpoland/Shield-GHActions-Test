@@ -328,7 +328,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./ci/scripts/generate-release-notes \
+          ./ci/scripts/generate-release-notes.sh \
             "${{ needs.build-kit.outputs.version }}"
             "${{ github.workspace }}/previous-tag" \
           "release-notes.md"
