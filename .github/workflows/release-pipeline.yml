@@ -177,7 +177,7 @@ jobs:
         with:
           name: kit-build
           
-        - name: Check Specs
+      - name: Check Specs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
