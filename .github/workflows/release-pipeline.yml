@@ -238,6 +238,7 @@ jobs:
           
           if [[ -n "$PREVIOUS_TAG" ]]; then
             echo "Comparing specs with previous release $PREVIOUS_TAG..."
+            pwd
             ls -lah ./ci/scripts/
             ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
             
