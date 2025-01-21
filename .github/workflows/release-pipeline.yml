@@ -236,7 +236,7 @@ jobs:
           
           if [[ -n "$PREVIOUS_TAG" ]]; then
             echo "Comparing specs with previous release $PREVIOUS_TAG..."
-            ls -lah
+            ls -lah ./ci/scripts/
             ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
             
             # Check if there are significant changes
