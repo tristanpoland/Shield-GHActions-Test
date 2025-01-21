@@ -177,90 +177,90 @@ jobs:
         with:
           name: kit-build
           
-          - name: Check Specs
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
-          run: |
-            sudo chmod -R a+rwx ./*
-            # Install required tools
-            wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
-            wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
-            wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
-            wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
-            wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
-            wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
-        
-            tar -xvf credhub-linux-amd64-2.9.41.tgz
-        
-            # Set up binaries
-            sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
-            sudo mv ./credhub /bin/credhub
-            sudo mv ./safe-linux-amd64 /bin/safe
-            sudo mv ./spruce-linux-amd64 /bin/spruce
-            sudo mv ./genesis /bin/genesis
-        
-            # Use absolute paths for script permissions
-            chmod u+x "${GITHUB_WORKSPACE}/ci/scripts/compare-release-specs.sh"
-            chmod u+x /bin/bosh
-            chmod u+x /bin/credhub
-            chmod u+x /bin/safe
-            chmod u+x /bin/spruce
-            chmod u+x /bin/genesis
-        
-            # Install Vault
-            wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
-            sudo apt update && sudo apt install vault
-        
-            # Set up Go environment
-            sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
-            go install github.com/onsi/ginkgo/v2/ginkgo@latest
-            export PATH=$PATH:~/go/bin
-        
-            # Create output directory with absolute path
-            mkdir -p "${GITHUB_WORKSPACE}/spec-check"
+        - name: Check Specs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+        run: |
+          sudo chmod -R a+rwx ./*
+          # Install required tools
+          wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
+          wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
+          wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
+          wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
+          wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
+          wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
+      
+          tar -xvf credhub-linux-amd64-2.9.41.tgz
+      
+          # Set up binaries
+          sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
+          sudo mv ./credhub /bin/credhub
+          sudo mv ./safe-linux-amd64 /bin/safe
+          sudo mv ./spruce-linux-amd64 /bin/spruce
+          sudo mv ./genesis /bin/genesis
+      
+          # Use absolute paths for script permissions
+          chmod u+x "${GITHUB_WORKSPACE}/ci/scripts/compare-release-specs.sh"
+          chmod u+x /bin/bosh
+          chmod u+x /bin/credhub
+          chmod u+x /bin/safe
+          chmod u+x /bin/spruce
+          chmod u+x /bin/genesis
+      
+          # Install Vault
+          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install vault
+      
+          # Set up Go environment
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
+          go install github.com/onsi/ginkgo/v2/ginkgo@latest
+          export PATH=$PATH:~/go/bin
+      
+          # Create output directory with absolute path
+          mkdir -p "${GITHUB_WORKSPACE}/spec-check"
+          
+          # Get the previous release for comparison
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git checkout $PREVIOUS_TAG
+            # Store the old specs with absolute paths
+            cp -r "${GITHUB_WORKSPACE}/spec/results" "${GITHUB_WORKSPACE}/spec-check/old-specs"
+            git checkout -
+          fi
+          
+          # Run spec tests to generate new specs
+          cd "${GITHUB_WORKSPACE}/spec"
+          ginkgo -p .
+          cd "${GITHUB_WORKSPACE}"
+          
+          # Generate the spec comparison
+          results_file="${GITHUB_WORKSPACE}/spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "Comparing specs with previous release $PREVIOUS_TAG..."
             
-            # Get the previous release for comparison
-            if [[ -n "$PREVIOUS_TAG" ]]; then
-              git checkout $PREVIOUS_TAG
-              # Store the old specs with absolute paths
-              cp -r "${GITHUB_WORKSPACE}/spec/results" "${GITHUB_WORKSPACE}/spec-check/old-specs"
-              git checkout -
-            fi
+            SCRIPTS_DIR="${GITHUB_WORKSPACE}/ci/scripts"
+            COMPARE_SCRIPT="${SCRIPTS_DIR}/compare-release-specs.sh"
             
-            # Run spec tests to generate new specs
-            cd "${GITHUB_WORKSPACE}/spec"
-            ginkgo -p .
-            cd "${GITHUB_WORKSPACE}"
-            
-            # Generate the spec comparison
-            results_file="${GITHUB_WORKSPACE}/spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
-            
-            if [[ -n "$PREVIOUS_TAG" ]]; then
-              echo "Comparing specs with previous release $PREVIOUS_TAG..."
-              
-              SCRIPTS_DIR="${GITHUB_WORKSPACE}/ci/scripts"
-              COMPARE_SCRIPT="${SCRIPTS_DIR}/compare-release-specs.sh"
-              
-              if [ -f "$COMPARE_SCRIPT" ]; then
-                echo "Found comparison script at $COMPARE_SCRIPT"
-                "$COMPARE_SCRIPT" "$PREVIOUS_TAG" > "$results_file"
-              else
-                echo "Error: Script not found at $COMPARE_SCRIPT"
-                echo "Current directory structure:"
-                ls -R "${GITHUB_WORKSPACE}/ci"
-                exit 1
-              fi
-              
-              # Check if there are significant changes
-              if ! grep -q "No Spec Changes to Consider" "$results_file"; then
-                echo "::warning ::Detected spec changes that may impact users"
-              fi
+            if [ -f "$COMPARE_SCRIPT" ]; then
+              echo "Found comparison script at $COMPARE_SCRIPT"
+              "$COMPARE_SCRIPT" "$PREVIOUS_TAG" > "$results_file"
             else
-              echo "No previous release found - this appears to be the first release"
-              echo "Initial release - no spec changes to compare" > "$results_file"
+              echo "Error: Script not found at $COMPARE_SCRIPT"
+              echo "Current directory structure:"
+              ls -R "${GITHUB_WORKSPACE}/ci"
+              exit 1
             fi
+            
+            # Check if there are significant changes
+            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
+              echo "::warning ::Detected spec changes that may impact users"
+            fi
+          else
+            echo "No previous release found - this appears to be the first release"
+            echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
           
       - name: Convert Spec Diffs to HTML
         if: success()
