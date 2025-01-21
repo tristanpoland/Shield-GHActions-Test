@@ -1,5 +1,11 @@
+# This workflow handles the complete release pipeline for the Shield kit
+# It includes building, testing, and deploying the kit, along with creating releases
 name: Release Pipeline
 
+# Trigger the workflow on:
+# - Push to develop or main branches (except ci/ directory changes)
+# - Pull requests to develop branch (except ci/ directory changes)
+# - Manual trigger with version bump option
 on:
   push:
     branches: [develop, main]
@@ -14,20 +20,23 @@ on:
         required: false
         type: choice
         options:
-          - patch
-          - minor
-          - major
+          - patch  # For backwards-compatible bug fixes
+          - minor  # For new features, backwards-compatible
+          - major  # For breaking changes
         default: 'patch'
 
+# Environment variables used across jobs
 env:
   KIT_NAME: shield # From meta.kit in settings.yml
 
+# Required permissions for the workflow
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: write      # Needed for creating releases and tags
+  pull-requests: write # Needed for creating PRs
+  issues: write        # Needed for creating issues
 
 jobs:
+  # Job: Build the Genesis kit
   build-kit:
     runs-on: ubuntu-latest
     outputs:
@@ -50,6 +59,7 @@ jobs:
           
       - name: Build Kit
         env:
+          # Secrets needed for Genesis and BOSH operations
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
@@ -58,12 +68,14 @@ jobs:
           BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
         run: |
+          # Download required tools
           wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
           wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
           wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
           wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
           wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
 
+          # Extract and install tools
           tar -xvf credhub-linux-amd64-2.9.41.tgz
 
           sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
@@ -77,10 +89,12 @@ jobs:
           chmod u+x /bin/spruce
           chmod u+x ./genesis
 
+          # Install Vault
           wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
           sudo apt update && sudo apt install vault
           
+          # Compile the kit
           VERSION="${{ steps.version.outputs.new_version }}"
           ./genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
           
@@ -89,6 +103,7 @@ jobs:
           name: kit-build
           path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
 
+  # Job: Run specification tests
   spec-tests:
     needs: [build-kit]
     runs-on: ubuntu-latest
@@ -104,14 +119,15 @@ jobs:
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
         run: |
+          # Install Go and required tools
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
-
           wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
           wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
           wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
           wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
           wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
 
+          # Extract and set up tools
           tar -xvf credhub-linux-amd64-2.9.41.tgz
 
           sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
@@ -126,16 +142,21 @@ jobs:
           chmod u+x /bin/spruce
           chmod u+x /bin/genesis
 
+          # Install Vault
           wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
           sudo apt update && sudo apt install vault
 
+          # Set up Go environment
           sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
           export PATH=$PATH:~/go/bin
+          
+          # Run tests
           cd spec
           ginkgo -p .
 
+  # Job: Check for specification changes
   spec-check:
     needs: [build-kit]
     runs-on: ubuntu-latest
@@ -160,8 +181,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
         run: |
+          # Install required tools
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
-
           wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
           wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
           wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
@@ -170,6 +191,7 @@ jobs:
 
           tar -xvf credhub-linux-amd64-2.9.41.tgz
 
+          # Set up binaries
           sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
           sudo mv ./credhub /bin/credhub
           sudo mv ./safe-linux-amd64 /bin/safe
@@ -183,10 +205,12 @@ jobs:
           chmod u+x /bin/spruce
           chmod u+x /bin/genesis
 
+          # Install Vault
           wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
           echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
           sudo apt update && sudo apt install vault
 
+          # Set up Go environment
           sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
           export PATH=$PATH:~/go/bin
@@ -227,9 +251,10 @@ jobs:
       - name: Convert Spec Diffs to HTML
         if: success()
         run: |
-          # Install aha for ANSI to HTML conversion if needed
+          # Install aha for ANSI to HTML conversion
           sudo apt-get update && sudo apt-get install -y aha
           
+          # Convert all diff files to HTML
           for diff in spec-check/diff-*; do
             if [ -f "$diff" ]; then
               cat "$diff" | aha > "${diff}.html"
@@ -245,18 +270,7 @@ jobs:
               exit 0
             fi
           done
-          
-      - name: Convert Spec Diffs to HTML
-        if: success()
-        run: |
-          # Install aha for ANSI to HTML conversion if needed
-          sudo apt-get update && sudo apt-get install -y aha
-          
-          for diff in spec-check/diff-*; do
-            if [ -f "$diff" ]; then
-              cat "$diff" | aha > "${diff}.html"
-            fi
-          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: spec-diffs
@@ -264,6 +278,7 @@ jobs:
             spec-check/diff-*
             spec-check/*.html
 
+  # Job: Deploy and test the kit
   deploy:
     needs: [spec-tests, spec-check]
     runs-on: ubuntu-latest
@@ -278,6 +293,11 @@ jobs:
         uses: ./.github/actions/setup-infra
         with:
           iaas: vsphere
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          gcp_service_account_key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          vsphere_username: ${{ secrets.VSPHERE_USERNAME }}
+          vsphere_password: ${{ secrets.VSPHERE_PASSWORD }}
           
       - name: Deploy and Test
         env:
@@ -293,6 +313,7 @@ jobs:
         run: |
           ./ci/scripts/test-deployment
 
+  # Job: Prepare release (only on develop branch)
   prepare-release:
     if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
     needs: [deploy, build-kit]
@@ -308,10 +329,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./ci/scripts/generate-release-notes \
-            "${{ needs.build-kit.outputs.version }}" \
-            "$(pwd)" \
+            "${{ needs.build-kit.outputs.version }}"
             "${{ github.workspace }}/previous-tag" \
-            "release-notes.md"
+          "release-notes.md"
             
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
@@ -326,6 +346,7 @@ jobs:
           labels: release
           base: main
 
+  # Job: Create GitHub Release (only on main branch)
   release:
     if: github.ref == 'refs/heads/main'
     needs: [deploy, build-kit]
@@ -347,6 +368,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         uses: softprops/action-gh-release@v1
         with:
+          # Release configuration
           tag_name: v${{ needs.build-kit.outputs.version }}
           name: v${{ needs.build-kit.outputs.version }}
           body_path: release-notes/release-notes.md
