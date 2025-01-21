@@ -235,6 +235,10 @@ jobs:
           
           # Generate the spec comparison
           results_file="${GITHUB_WORKSPACE}/spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+
+          echo "Results of spec comparison" > "$results_file"
+
+          cat $results_file
           
           if [[ -n "$PREVIOUS_TAG" ]]; then
             echo "Comparing specs with previous release $PREVIOUS_TAG..."
