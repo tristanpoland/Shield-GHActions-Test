@@ -182,7 +182,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
         run: |
-          sudo chmod -R a+rwx ./*
+          sudo chmod -R a+rwx ${GITHUB_WORKSPACE}/*
           # Install required tools
           wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
           wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
