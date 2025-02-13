@@ -18,6 +18,15 @@ on:
           - minor
           - major
         default: 'patch'
+      release_type:
+        description: 'Release type'
+        required: true
+        type: choice
+        options:
+          - release
+          - pre-release
+          - none
+        default: 'none'
 
 permissions:
   contents: write
@@ -246,7 +255,10 @@ jobs:
           base: ${{ env.BASE_BRANCH }}
 
   release:
-    if: github.ref == 'refs/heads/main'
+    # Run on main branch OR when manually triggered with release/pre-release type
+    if: |
+      github.ref == 'refs/heads/main' || 
+      (github.event_name == 'workflow_dispatch' && inputs.release_type != 'none')
     needs: [deploy, build-kit, spec-check]
     runs-on: ubuntu-latest
     steps:
@@ -275,8 +287,10 @@ jobs:
           files: |
             *.tar.gz
             spec-diffs/*
-          prerelease: ${{ env.PRERELEASE }}
+          # Use workflow dispatch input if available, otherwise use env default
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.release_type == 'pre-release' || env.PRERELEASE }}
           discussion_category_name: Releases
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.release_type == 'none' }}
           
       - name: Notify Success
         if: success()
@@ -285,5 +299,6 @@ jobs:
           message: |
             Successfully released v${{ needs.build-kit.outputs.version }}
             Previous version: v${{ needs.build-kit.outputs.previous_version }}
+            Type: ${{ github.event_name == 'workflow_dispatch' && inputs.release_type || 'release' }}
             ${{ needs.spec-check.outputs.has_breaking_changes == 'true' && '⚠️ Contains breaking changes!' || '' }}
           status: success
