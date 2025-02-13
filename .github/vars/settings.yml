@@ -5,7 +5,6 @@ kit:
 # Build Configuration
 build:
   fetch_depth: 0  # Need full history for tags
-  default_version_bump: patch
 
 # Environment Configuration
 environments:

@@ -17,8 +17,7 @@ on:
           - patch
           - minor
           - major
-        default: ${{ vars.build.default_version_bump }}
-
+        default: 'patch'
 env:
   KIT_NAME: ${{ vars.kit.name }}
 
