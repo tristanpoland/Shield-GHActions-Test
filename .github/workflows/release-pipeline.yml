@@ -308,6 +308,7 @@ jobs:
       - name: Deploy and Test
         env:
           DEPLOY_ENV: ci-vsphere-baseline
+          CI_ROOT: "ci"
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
