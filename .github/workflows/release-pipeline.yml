@@ -25,70 +25,22 @@ permissions:
   issues: write
 
 jobs:
-  load-env:
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v4
-        
-        - name: Load and Compile Environment Variables
-          run: |
-            # Create the compiled env file
-            {
-              echo "KIT_NAME=shield"
-              echo "BUILD_FETCH_DEPTH=0"
-              echo "BUILD_DEFAULT_VERSION_BUMP=patch"
-              echo "GO_VERSION=1.23.5"
-              echo "GO_PLATFORM=linux-amd64"
-              echo "TEST_SPEC_DIR=spec"
-              echo "TEST_SPEC_RUNNER=ginkgo"
-              echo "TEST_SPEC_PARALLEL=true"
-              echo "TEST_RESULTS_DIR=spec-check"
-              echo "TEST_DIFF_PREFIX=diff-"
-              echo "RELEASE_LABELS=release"
-              echo "RELEASE_BASE_BRANCH=main"
-              echo "RELEASE_PR_TITLE_PREFIX=Release v"
-              echo "INFRA_DEFAULT_IAAS=vsphere"
-            } >> "$GITHUB_ENV"
-            
-            # Load environment-specific variables based on context
-            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-              {
-                echo "DEPLOY_ENV=ci-vsphere-baseline"
-                echo "CI_ROOT=${GITHUB_WORKSPACE}/ci"
-                echo "ENV_NAME=production"
-              } >> "$GITHUB_ENV"
-            elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-              {
-                echo "DEPLOY_ENV=ci-vsphere-test"
-                echo "CI_ROOT=${GITHUB_WORKSPACE}/ci"
-                echo "ENV_NAME=testing"
-              } >> "$GITHUB_ENV"
-            else
-              {
-                echo "DEPLOY_ENV=ci-vsphere-dev"
-                echo "CI_ROOT=${GITHUB_WORKSPACE}/ci"
-                echo "ENV_NAME=development"
-              } >> "$GITHUB_ENV"
-            fi
-            
-            # Print the final env for debugging
-            echo "Final environment variables:"
-            cat "$GITHUB_ENV"
-
   build-kit:
-    needs: load-env
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.new_version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ env.BUILD_FETCH_DEPTH }}
+          fetch-depth: 0
+          
+      - name: Load Environment Variables
+        run: cat .github/config/.env >> $GITHUB_ENV
           
       - id: version
         uses: ./.github/actions/version-manager
         with:
-          bump_type: ${{ inputs.version_bump || env.BUILD_DEFAULT_VERSION_BUMP }}
+          bump_type: ${{ inputs.version_bump || env.VERSION_DEFAULT }}
           
       - name: Push version change
         run: |
@@ -108,6 +60,7 @@ jobs:
         run: |
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
+          
           VERSION="${{ steps.version.outputs.new_version }}"
           genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
           
@@ -117,13 +70,16 @@ jobs:
           path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
 
   spec-tests:
-    needs: [load-env, build-kit]
+    needs: [build-kit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: kit-build
+          
+      - name: Load Environment Variables
+        run: cat .github/config/.env >> $GITHUB_ENV
           
       - name: Run Spec Tests
         env:
@@ -134,37 +90,95 @@ jobs:
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
 
-          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go${{ env.GO_VERSION }}.${{ env.GO_PLATFORM }}.tar.gz
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf ${{ env.GO_VERSION }}
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
           export PATH=$PATH:~/go/bin
           
-          cd ${{ env.TEST_SPEC_DIR }}
-          ${{ env.TEST_SPEC_RUNNER }} ${{ env.TEST_SPEC_PARALLEL == 'true' && '-p' || '' }} .
+          cd spec
+          ginkgo ${{ env.GINKGO_PARAMS }} .
 
   spec-check:
-    needs: [load-env, build-kit]
+    needs: [build-kit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ env.BUILD_FETCH_DEPTH }}
+          fetch-depth: 0
           
-      # ... rest of the spec-check job remains the same but using env.* instead of vars.*
+      - name: Load Environment Variables
+        run: cat .github/config/.env >> $GITHUB_ENV
+          
+      - name: Get latest release tag
+        id: latest_tag
+        run: |
+          git fetch --tags
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+          
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Check Specs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+        run: |
+          sudo chmod -R a+rwx ./*
+          ./ci/scripts/ensure-tools.sh
+
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf ${{ env.GO_VERSION }}
+          go install github.com/onsi/ginkgo/v2/ginkgo@latest
+          export PATH=$PATH:~/go/bin
+
+          mkdir -p ${{ env.SPEC_CHECK_DIR }}
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git checkout $PREVIOUS_TAG
+            cp -r spec/results ./${{ env.SPEC_CHECK_DIR }}/old-specs
+            git checkout -
+          fi
+          
+          cd spec
+          ginkgo ${{ env.GINKGO_PARAMS }} .
+          cd ..
+          
+          results_file="${GITHUB_WORKSPACE}/${{ env.SPEC_CHECK_DIR }}/diff-$(date -u +%Y%m%d%H%M%S)"
+          echo "Results of spec comparison" > "$results_file"
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "Comparing specs with previous release $PREVIOUS_TAG..."
+            bash -x ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
+            
+            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
+              echo "::warning ::Detected spec changes that may impact users"
+            fi
+          else
+            echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-diffs
+          path: ${{ env.SPEC_CHECK_DIR }}/*
 
   deploy:
-    needs: [load-env, spec-tests, spec-check]
+    needs: [spec-tests, spec-check]
     runs-on: ubuntu-latest
-    environment: ci-testing
+    environment: ${{ env.TEST_ENV }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: kit-build
           
+      - name: Load Environment Variables
+        run: cat .github/config/.env >> $GITHUB_ENV
+          
       - name: Set up Infrastructure
         uses: ./.github/actions/setup-infra
         with:
-          iaas: ${{ env.INFRA_DEFAULT_IAAS }}
+          iaas: ${{ env.IAAS_PROVIDER }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           gcp_service_account_key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
@@ -174,7 +188,7 @@ jobs:
       - name: Deploy and Test
         env:
           DEPLOY_ENV: ${{ env.DEPLOY_ENV }}
-          CI_ROOT: ${{ env.CI_ROOT }}
+          CI_ROOT: ${{ github.workspace }}/${{ env.CI_ROOT }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
@@ -191,13 +205,16 @@ jobs:
 
   prepare-release:
     if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
-    needs: [load-env, deploy, build-kit]
+    needs: [deploy, build-kit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: spec-diffs
+          
+      - name: Load Environment Variables
+        run: cat .github/config/.env >> $GITHUB_ENV
           
       - name: Generate Release Notes
         env:
@@ -206,30 +223,32 @@ jobs:
           ./ci/scripts/generate-release-notes.sh \
             "${{ needs.build-kit.outputs.version }}" \
             "${{ github.workspace }}/previous-tag" \
-            "release-notes.md"
+            "${{ env.RELEASE_NOTES_FILE }}"
             
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: release/${{ needs.build-kit.outputs.version }}
-          title: ${{ env.RELEASE_PR_TITLE_PREFIX }}${{ needs.build-kit.outputs.version }}
+          title: Release v${{ needs.build-kit.outputs.version }}
           body: |
             Release preparation for version ${{ needs.build-kit.outputs.version }}
-            
             Generated release notes and spec diffs attached.
-          labels: ${{ env.RELEASE_LABELS }}
-          base: ${{ env.RELEASE_BASE_BRANCH }}
+          labels: ${{ env.PR_LABELS }}
+          base: ${{ env.BASE_BRANCH }}
 
   release:
     if: github.ref == 'refs/heads/main'
-    needs: [load-env, deploy, build-kit]
+    needs: [deploy, build-kit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: kit-build
+          
+      - name: Load Environment Variables
+        run: cat .github/config/.env >> $GITHUB_ENV
           
       - name: Download Spec Diffs
         uses: actions/download-artifact@v4
@@ -244,11 +263,11 @@ jobs:
         with:
           tag_name: v${{ needs.build-kit.outputs.version }}
           name: v${{ needs.build-kit.outputs.version }}
-          body_path: release-notes/release-notes.md
+          body_path: release-notes/${{ env.RELEASE_NOTES_FILE }}
           files: |
             *.tar.gz
             spec-diffs/*
-          prerelease: false
+          prerelease: ${{ env.PRERELEASE }}
           
       - name: Notify Success
         if: success()
