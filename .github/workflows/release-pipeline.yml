@@ -26,44 +26,54 @@ permissions:
 
 jobs:
   load-env:
-    runs-on: ubuntu-latest
-    outputs:
-      env_vars: ${{ steps.set-env.outputs.env_vars }}
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Load Environment Variables
-        id: set-env
-        run: |
-          # Load common environment variables
-          if [ -f .github/env/common.env ]; then
-            while IFS= read -r line || [ -n "$line" ]; do
-              # Skip comments and empty lines
-              if [[ $line =~ ^[^#].+=.+ ]]; then
-                echo "$line" >> $GITHUB_ENV
-                # Also add to output for other jobs
-                echo "$line" >> $GITHUB_OUTPUT
-              fi
-            done < .github/env/common.env
-          fi
-          
-          # Determine environment file based on context
-          ENV_FILE=".github/env/development.env"
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            ENV_FILE=".github/env/production.env"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            ENV_FILE=".github/env/testing.env"
-          fi
-          
-          # Load environment-specific variables
-          if [ -f "$ENV_FILE" ]; then
-            while IFS= read -r line || [ -n "$line" ]; do
-              if [[ $line =~ ^[^#].+=.+ ]]; then
-                echo "$line" >> $GITHUB_ENV
-                echo "$line" >> $GITHUB_OUTPUT
-              fi
-            done < "$ENV_FILE"
-          fi
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        
+        - name: Load and Compile Environment Variables
+          run: |
+            # Create the compiled env file
+            {
+              echo "KIT_NAME=shield"
+              echo "BUILD_FETCH_DEPTH=0"
+              echo "BUILD_DEFAULT_VERSION_BUMP=patch"
+              echo "GO_VERSION=1.23.5"
+              echo "GO_PLATFORM=linux-amd64"
+              echo "TEST_SPEC_DIR=spec"
+              echo "TEST_SPEC_RUNNER=ginkgo"
+              echo "TEST_SPEC_PARALLEL=true"
+              echo "TEST_RESULTS_DIR=spec-check"
+              echo "TEST_DIFF_PREFIX=diff-"
+              echo "RELEASE_LABELS=release"
+              echo "RELEASE_BASE_BRANCH=main"
+              echo "RELEASE_PR_TITLE_PREFIX=Release v"
+              echo "INFRA_DEFAULT_IAAS=vsphere"
+            } >> "$GITHUB_ENV"
+            
+            # Load environment-specific variables based on context
+            if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+              {
+                echo "DEPLOY_ENV=ci-vsphere-baseline"
+                echo "CI_ROOT=${GITHUB_WORKSPACE}/ci"
+                echo "ENV_NAME=production"
+              } >> "$GITHUB_ENV"
+            elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              {
+                echo "DEPLOY_ENV=ci-vsphere-test"
+                echo "CI_ROOT=${GITHUB_WORKSPACE}/ci"
+                echo "ENV_NAME=testing"
+              } >> "$GITHUB_ENV"
+            else
+              {
+                echo "DEPLOY_ENV=ci-vsphere-dev"
+                echo "CI_ROOT=${GITHUB_WORKSPACE}/ci"
+                echo "ENV_NAME=development"
+              } >> "$GITHUB_ENV"
+            fi
+            
+            # Print the final env for debugging
+            echo "Final environment variables:"
+            cat "$GITHUB_ENV"
 
   build-kit:
     needs: load-env
@@ -99,12 +109,12 @@ jobs:
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
           VERSION="${{ steps.version.outputs.new_version }}"
-          genesis compile-kit --force -v "${KIT_VERSION}" -n "${KIT_NAME}"
+          genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
           
       - uses: actions/upload-artifact@v4
         with:
           name: kit-build
-          path: ${{ KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
+          path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
 
   spec-tests:
     needs: [load-env, build-kit]
