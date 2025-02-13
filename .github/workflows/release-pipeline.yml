@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.new_version }}
+      previous_version: ${{ steps.version.outputs.previous_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,12 +58,12 @@ jobs:
           BOSH_CLIENT_SECRET: ${{ secrets.BOSH_CLIENT_SECRET }}
           BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
+          KIT_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
           
-          VERSION="${{ steps.version.outputs.new_version }}"
-          genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
+          genesis compile-kit --force -v "$KIT_VERSION" -n "${{ env.KIT_NAME }}"
           
       - uses: actions/upload-artifact@v4
         with:
@@ -86,6 +87,7 @@ jobs:
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          KIT_VERSION: ${{ needs.build-kit.outputs.version }}
         run: |
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
@@ -100,6 +102,8 @@ jobs:
   spec-check:
     needs: [build-kit]
     runs-on: ubuntu-latest
+    outputs:
+      has_breaking_changes: ${{ steps.check-breaking.outputs.has_breaking_changes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,21 +112,11 @@ jobs:
       - name: Load Environment Variables
         run: cat .github/config/.env >> $GITHUB_ENV
           
-      - name: Get latest release tag
-        id: latest_tag
-        run: |
-          git fetch --tags
-          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
-          
-      - uses: actions/download-artifact@v4
-        with:
-          name: kit-build
-          
       - name: Check Specs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+          CURRENT_VERSION: ${{ needs.build-kit.outputs.version }}
+          PREVIOUS_VERSION: ${{ needs.build-kit.outputs.previous_version }}
         run: |
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
@@ -133,8 +127,8 @@ jobs:
 
           mkdir -p ${{ env.SPEC_CHECK_DIR }}
           
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            git checkout $PREVIOUS_TAG
+          if [[ -n "$PREVIOUS_VERSION" ]]; then
+            git checkout "v$PREVIOUS_VERSION"
             cp -r spec/results ./${{ env.SPEC_CHECK_DIR }}/old-specs
             git checkout -
           fi
@@ -144,17 +138,20 @@ jobs:
           cd ..
           
           results_file="${GITHUB_WORKSPACE}/${{ env.SPEC_CHECK_DIR }}/diff-$(date -u +%Y%m%d%H%M%S)"
-          echo "Results of spec comparison" > "$results_file"
+          echo "Comparing specs between v$PREVIOUS_VERSION and v$CURRENT_VERSION" > "$results_file"
           
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            echo "Comparing specs with previous release $PREVIOUS_TAG..."
-            bash -x ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
-            
-            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
-              echo "::warning ::Detected spec changes that may impact users"
-            fi
+          if [[ -n "$PREVIOUS_VERSION" ]]; then
+            ./ci/scripts/compare-release-specs.sh "v$PREVIOUS_VERSION" > "$results_file"
           else
             echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
+
+      - id: check-breaking
+        run: |
+          if grep -q "BREAKING CHANGE" ${{ env.SPEC_CHECK_DIR }}/diff-*; then
+            echo "has_breaking_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_breaking_changes=false" >> $GITHUB_OUTPUT
           fi
 
       - uses: actions/upload-artifact@v4
@@ -162,9 +159,9 @@ jobs:
           name: spec-diffs
           path: ${{ env.SPEC_CHECK_DIR }}/*
 
-deploy:
-    needs: [spec-tests, spec-check]
-    runs-on: ${{ vars.RUNNER_OS }}
+  deploy:
+    needs: [spec-tests, spec-check, build-kit]
+    runs-on: ubuntu-latest
     environment: ${{ vars.TEST_ENVIRONMENT }}
     steps:
       - uses: actions/checkout@v4
@@ -198,6 +195,7 @@ deploy:
           BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
           SECRETS_SEED_DATA: ${{ secrets.SECRETS_SEED_DATA }}
+          KIT_VERSION: ${{ needs.build-kit.outputs.version }}
         run: |
           sudo chmod -R a+rwx ./**
           ./ci/scripts/ensure-tools.sh
@@ -205,7 +203,7 @@ deploy:
 
   prepare-release:
     if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
-    needs: [deploy, build-kit]
+    needs: [deploy, build-kit, spec-check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -219,27 +217,33 @@ deploy:
       - name: Generate Release Notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_VERSION: ${{ needs.build-kit.outputs.version }}
+          PREVIOUS_VERSION: ${{ needs.build-kit.outputs.previous_version }}
+          HAS_BREAKING_CHANGES: ${{ needs.spec-check.outputs.has_breaking_changes }}
         run: |
           ./ci/scripts/generate-release-notes.sh \
-            "${{ needs.build-kit.outputs.version }}" \
-            "${{ github.workspace }}/previous-tag" \
+            "$CURRENT_VERSION" \
+            "$PREVIOUS_VERSION" \
             "${{ env.RELEASE_NOTES_FILE }}"
             
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: release/${{ needs.build-kit.outputs.version }}
+          branch: ${{ env.RELEASE_BRANCH_PREFIX }}${{ needs.build-kit.outputs.version }}
           title: Release v${{ needs.build-kit.outputs.version }}
           body: |
             Release preparation for version ${{ needs.build-kit.outputs.version }}
+            Previous version: ${{ needs.build-kit.outputs.previous_version }}
+            ${{ needs.spec-check.outputs.has_breaking_changes == 'true' && '⚠️ Contains breaking changes!' || '' }}
+            
             Generated release notes and spec diffs attached.
-          labels: ${{ env.PR_LABELS }}
+          labels: ${{ env.PR_LABELS }}${{ needs.spec-check.outputs.has_breaking_changes == 'true' && ',breaking-change' || '' }}
           base: ${{ env.BASE_BRANCH }}
 
   release:
     if: github.ref == 'refs/heads/main'
-    needs: [deploy, build-kit]
+    needs: [deploy, build-kit, spec-check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -268,10 +272,14 @@ deploy:
             *.tar.gz
             spec-diffs/*
           prerelease: ${{ env.PRERELEASE }}
+          discussion_category_name: Releases
           
       - name: Notify Success
         if: success()
         uses: ./.github/actions/notify
         with:
-          message: "Successfully released v${{ needs.build-kit.outputs.version }}"
+          message: |
+            Successfully released v${{ needs.build-kit.outputs.version }}
+            Previous version: v${{ needs.build-kit.outputs.previous_version }}
+            ${{ needs.spec-check.outputs.has_breaking_changes == 'true' && '⚠️ Contains breaking changes!' || '' }}
           status: success
