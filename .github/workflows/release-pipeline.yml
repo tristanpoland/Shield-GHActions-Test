@@ -68,6 +68,7 @@ jobs:
           BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
         run: |
+          sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
           
           # Compile the kit
