@@ -1,0 +1,4205 @@
+$$--GLUE--$$
+# This is a GLUE file; an amalgamation of files across one or more paths designed to give project contexts to LLMs easily. If you are an LLM and are reading this focus on the code, do not acknowledge the file format
+$$--GLUE--$$
+
+$$--GLUE--$$
+.\.gitattributes
+$$--GLUE--$$
+*.sh text eol=lf
+$$--GLUE--$$
+.\.github\actions\notify\action.yml
+$$--GLUE--$$
+name: Notify
+description: Sends notifications about pipeline status
+
+inputs:
+  message:
+    description: 'Notification message'
+    required: true
+  status:
+    description: 'Status (success/failure)'
+    required: true
+    default: 'success'
+  url:
+    description: 'URL to include in notification'
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Send Notification
+      shell: bash
+      env:
+        SHOUT_URL: ${{ secrets.SHOUT_URL }}
+        SHOUT_USER: ${{ secrets.SHOUT_USERNAME }}
+        SHOUT_PASS: ${{ secrets.SHOUT_PASSWORD }}
+      run: |
+        if [[ -n "$SHOUT_URL" ]]; then
+          STATUS_ICON=""
+          if [[ "${{ inputs.status }}" == "success" ]]; then
+            STATUS_ICON="✅"
+          else
+            STATUS_ICON="❌"
+          fi
+          
+          MESSAGE="${STATUS_ICON} ${{ inputs.message }}"
+          if [[ -n "${{ inputs.url }}" ]]; then
+            MESSAGE+=" ${{ inputs.url }}"
+          fi
+          
+          curl -X POST "${SHOUT_URL}" \
+            -u "${SHOUT_USER}:${SHOUT_PASS}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"${MESSAGE}\", \"topic\": \"${GITHUB_REPOSITORY##*/}-pipeline\"}"
+        fi
+$$--GLUE--$$
+.\.github\actions\setup-infra\action.yml
+$$--GLUE--$$
+name: Setup Infrastructure
+description: Sets up infrastructure dependencies for deployment testing
+inputs:
+  iaas:
+    description: 'Infrastructure type (vsphere, aws, gcp, etc)'
+    required: true
+  aws_access_key_id:
+    description: 'AWS Access Key ID'
+    required: false
+  aws_secret_access_key:
+    description: 'AWS Secret Access Key'
+    required: false
+  gcp_service_account_key:
+    description: 'GCP Service Account Key'
+    required: false
+  vsphere_username:
+    description: 'vSphere Username'
+    required: false
+  vsphere_password:
+    description: 'vSphere Password'
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Install Dependencies
+      shell: bash
+      run: |
+        # Install common tools
+        sudo apt-get update
+        sudo apt-get install -y build-essential unzip jq
+        
+        # Install BOSH CLI
+        curl -Lo bosh https://github.com/cloudfoundry/bosh-cli/releases/latest/download/bosh-cli-linux-amd64
+        chmod +x bosh
+        sudo mv bosh /usr/local/bin/
+        
+        # Install Genesis
+        curl -Lo genesis https://github.com/genesis-community/genesis/releases/latest/download/genesis
+        chmod +x genesis
+        sudo mv genesis /usr/local/bin/
+        
+        # Install Spruce
+        curl -Lo spruce https://github.com/geofffranks/spruce/releases/latest/download/spruce-linux-amd64
+        chmod +x spruce
+        sudo mv spruce /usr/local/bin/
+        
+        # Install infrastructure-specific tools
+        case "${{ inputs.iaas }}" in
+          vsphere)
+            # VSphere specific setup
+            echo "Setting up VSphere tools..."
+            ;;
+          aws)
+            # AWS specific setup
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+            ;;
+          gcp)
+            # GCP specific setup
+            echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+            curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+            sudo apt-get update && sudo apt-get install google-cloud-cli
+            ;;
+        esac
+    - name: Configure Credentials
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
+        GCP_SERVICE_ACCOUNT_KEY: ${{ inputs.gcp_service_account_key }}
+        VSPHERE_USERNAME: ${{ inputs.vsphere_username }}
+        VSPHERE_PASSWORD: ${{ inputs.vsphere_password }}
+      run: |
+        case "${{ inputs.iaas }}" in
+          vsphere)
+            # Configure VSphere credentials
+            mkdir -p ~/.vsphere
+            echo "$VSPHERE_USERNAME" > ~/.vsphere/username
+            echo "$VSPHERE_PASSWORD" > ~/.vsphere/password
+            ;;
+          aws)
+            # Configure AWS credentials
+            mkdir -p ~/.aws
+            cat > ~/.aws/credentials << EOF
+        [default]
+        aws_access_key_id = $AWS_ACCESS_KEY_ID
+        aws_secret_access_key = $AWS_SECRET_ACCESS_KEY
+        EOF
+            ;;
+          gcp)
+            # Configure GCP credentials
+            echo "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/gcp-key.json
+            gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+            rm /tmp/gcp-key.json
+            ;;
+        esac
+
+$$--GLUE--$$
+.\.github\actions\spec-checks\action.yml
+$$--GLUE--$$
+spec-check:
+    needs: [build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+          
+      - name: Get latest release tag
+        id: latest_tag
+        run: |
+          git fetch --tags
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+          
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Check Specs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+        run: |
+          # Create output directory
+          mkdir -p spec-check
+          
+          # Get the previous release for comparison
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git checkout $PREVIOUS_TAG
+            # Store the old specs
+            cp -r spec/results ./spec-check/old-specs
+            git checkout -
+          fi
+          
+          # Run spec tests to generate new specs
+          cd spec
+          ginkgo -p .
+          cd ..
+          
+          # Generate the spec comparison
+          results_file="spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "Comparing specs with previous release $PREVIOUS_TAG..."
+            ./ci/scripts/compare-release-specs "$PREVIOUS_TAG" > "$results_file"
+            
+            # Check if there are significant changes
+            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
+              echo "::warning ::Detected spec changes that may impact users"
+            fi
+          else
+            echo "No previous release found - this appears to be the first release"
+            echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
+          
+      - name: Convert Spec Diffs to HTML
+        if: success()
+        run: |
+          # Install aha for ANSI to HTML conversion if needed
+          sudo apt-get update && sudo apt-get install -y aha
+          
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ]; then
+              cat "$diff" | aha > "${diff}.html"
+            fi
+          done
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-diffs
+          path: |
+            spec-check/diff-*
+            spec-check/*.html
+
+      - name: Check for Breaking Changes
+        if: success()
+        run: |
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
+              echo "::notice ::Spec changes detected - please review the changes"
+              exit 0
+            fi
+          done
+$$--GLUE--$$
+.\.github\actions\version-manager\action.yml
+$$--GLUE--$$
+name: 'Version Manager'
+description: 'Manages semver versioning for Genesis kits'
+author: 'Genesis Community'
+
+inputs:
+  bump_type:
+    description: 'Type of version bump'
+    required: true
+    default: 'patch'
+
+outputs:
+  new_version:
+    description: 'The new version number'
+    value: ${{ steps.bump.outputs.new_version }}
+  previous_version:
+    description: 'The previous version number'
+    value: ${{ steps.bump.outputs.previous_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Get current version
+      id: current
+      shell: bash
+      run: |
+        if [[ -f version ]]; then
+          version=$(cat version | grep -oP '(?<=Version: ).*' || echo "0.0.0")
+          echo "current_version=$version" >> $GITHUB_OUTPUT
+        else
+          echo "current_version=0.0.0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Bump version
+      id: bump
+      shell: bash
+      run: |
+        current="${{ steps.current.outputs.current_version }}"
+        
+        # Extract version components
+        major=$(echo "$current" | cut -d. -f1)
+        minor=$(echo "$current" | cut -d. -f2)
+        patch=$(echo "$current" | cut -d. -f3)
+        
+        # Bump version according to type
+        case "${{ inputs.bump_type }}" in
+          major)
+            major=$((major + 1))
+            minor=0
+            patch=0
+            ;;
+          minor)
+            minor=$((minor + 1))
+            patch=0
+            ;;
+          patch)
+            patch=$((patch + 1))
+            ;;
+        esac
+        
+        new_version="${major}.${minor}.${patch}"
+        echo "new_version=${new_version}" >> $GITHUB_OUTPUT
+        echo "previous_version=$current" >> $GITHUB_OUTPUT
+        
+        # Update version file
+        echo "## Version: ${new_version}" > version
+$$--GLUE--$$
+.\.github\workflows\release-pipeline.yml
+$$--GLUE--$$
+# This workflow handles the complete release pipeline for the Shield kit
+# It includes building, testing, and deploying the kit, along with creating releases
+name: Release Pipeline
+
+# Trigger the workflow on:
+# - Push to develop or main branches (except ci/ directory changes)
+# - Pull requests to develop branch (except ci/ directory changes)
+# - Manual trigger with version bump option
+on:
+  push:
+    branches: [develop, main]
+    paths-ignore: ['ci/**']
+  pull_request:
+    branches: [develop]
+    paths-ignore: ['ci/**']
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: false
+        type: choice
+        options:
+          - patch  # For backwards-compatible bug fixes
+          - minor  # For new features, backwards-compatible
+          - major  # For breaking changes
+        default: 'patch'
+
+# Environment variables used across jobs
+env:
+  KIT_NAME: shield # From meta.kit in settings.yml
+
+# Required permissions for the workflow
+permissions:
+  contents: write      # Needed for creating releases and tags
+  pull-requests: write # Needed for creating PRs
+  issues: write        # Needed for creating issues
+
+jobs:
+  # Job: Build the Genesis kit
+  build-kit:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+          
+      - id: version
+        uses: ./.github/actions/version-manager
+        with:
+          bump_type: ${{ inputs.version_bump || 'patch' }}
+          
+      - name: Push version change
+        run: |
+          git push origin HEAD
+          git tag "v${{ steps.version.outputs.new_version }}"
+          git push origin "v${{ steps.version.outputs.new_version }}"
+          
+      - name: Build Kit
+        env:
+          # Secrets needed for Genesis and BOSH operations
+          GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
+          GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+          GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          BOSH_CLIENT: ${{ secrets.BOSH_CLIENT }}
+          BOSH_CLIENT_SECRET: ${{ secrets.BOSH_CLIENT_SECRET }}
+          BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
+          BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
+        run: |
+          # Download required tools
+          wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
+          wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
+          wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
+          wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
+          wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
+
+          # Extract and install tools
+          tar -xvf credhub-linux-amd64-2.9.41.tgz
+
+          sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
+          sudo mv ./credhub /bin/credhub
+          sudo mv ./safe-linux-amd64 /bin/safe
+          sudo mv ./spruce-linux-amd64 /bin/spruce
+
+          chmod u+x /bin/bosh
+          chmod u+x /bin/credhub
+          chmod u+x /bin/safe
+          chmod u+x /bin/spruce
+          chmod u+x ./genesis
+
+          # Install Vault
+          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install vault
+          
+          # Compile the kit
+          VERSION="${{ steps.version.outputs.new_version }}"
+          ./genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
+          
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kit-build
+          path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
+
+  # Job: Run specification tests
+  spec-tests:
+    needs: [build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Run Spec Tests
+        env:
+          GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
+          GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+          GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+        run: |
+          sudo chmod -R a+rwx ./*
+          # Install Go and required tools
+          wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
+          wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
+          wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
+          wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
+          wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
+          wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
+
+          # Extract and set up tools
+          tar -xvf credhub-linux-amd64-2.9.41.tgz
+
+          sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
+          sudo mv ./credhub /bin/credhub
+          sudo mv ./safe-linux-amd64 /bin/safe
+          sudo mv ./spruce-linux-amd64 /bin/spruce
+          sudo mv ./genesis /bin/genesis
+
+          chmod u+x /bin/bosh
+          chmod u+x /bin/credhub
+          chmod u+x /bin/safe
+          chmod u+x /bin/spruce
+          chmod u+x /bin/genesis
+
+          # Install Vault
+          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install vault
+
+          # Set up Go environment
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
+          go install github.com/onsi/ginkgo/v2/ginkgo@latest
+          export PATH=$PATH:~/go/bin
+          
+          # Run tests
+          cd spec
+          ginkgo -p .
+
+  # Job: Check for specification changes
+  spec-check:
+    needs: [build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for tags
+          
+      - name: Get latest release tag
+        id: latest_tag
+        run: |
+          git fetch --tags
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+          
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Check Specs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ steps.latest_tag.outputs.tag }}
+        run: |
+          sudo chmod -R a+rwx ./*
+          # Install required tools
+          wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
+          wget https://github.com/genesis-community/genesis/releases/download/v3.0.13/genesis
+          wget https://github.com/geofffranks/spruce/releases/download/v1.31.1/spruce-linux-amd64
+          wget https://github.com/egen/safe/releases/download/v1.8.0/safe-linux-amd64
+          wget https://github.com/cloudfoundry/credhub-cli/releases/download/2.9.41/credhub-linux-amd64-2.9.41.tgz
+          wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-7.8.6-linux-amd64
+
+          tar -xvf credhub-linux-amd64-2.9.41.tgz
+
+          # Set up binaries
+          sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
+          sudo mv ./credhub /bin/credhub
+          sudo mv ./safe-linux-amd64 /bin/safe
+          sudo mv ./spruce-linux-amd64 /bin/spruce
+          sudo mv ./genesis /bin/genesis
+
+          chmod u+x ./ci/scripts/compare-release-specs.sh
+          chmod u+x /bin/bosh
+          chmod u+x /bin/credhub
+          chmod u+x /bin/safe
+          chmod u+x /bin/spruce
+          chmod u+x /bin/genesis
+
+          # Install Vault
+          wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+          sudo apt update && sudo apt install vault
+
+          # Set up Go environment
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
+          go install github.com/onsi/ginkgo/v2/ginkgo@latest
+          export PATH=$PATH:~/go/bin
+
+          # Create output directory
+          mkdir -p spec-check
+          
+          # Get the previous release for comparison
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            git checkout $PREVIOUS_TAG
+            # Store the old specs
+            cp -r spec/results ./spec-check/old-specs
+            git checkout -
+          fi
+          
+          # Run spec tests to generate new specs
+          cd spec
+          ginkgo -p .
+          cd ..
+          
+          # Generate the spec comparison
+          results_file="${GITHUB_WORKSPACE}/spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+
+          echo "Results of spec comparison" > "$results_file"
+
+          cat $results_file
+          
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            echo "Comparing specs with previous release $PREVIOUS_TAG..."
+            pwd
+            bash -x ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
+            
+            # Check if there are significant changes
+            if ! grep -q "No Spec Changes to Consider" "$results_file"; then
+              echo "::warning ::Detected spec changes that may impact users"
+            fi
+          else
+            echo "No previous release found - this appears to be the first release"
+            echo "Initial release - no spec changes to compare" > "$results_file"
+          fi
+          
+      - name: Convert Spec Diffs to HTML
+        if: success()
+        run: |
+          # Install aha for ANSI to HTML conversion
+          sudo apt-get update && sudo apt-get install -y aha
+          
+          # Convert all diff files to HTML
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ]; then
+              cat "$diff" | aha > "${diff}.html"
+            fi
+          done
+
+      - name: Check for Breaking Changes
+        if: success()
+        run: |
+          for diff in spec-check/diff-*; do
+            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
+              echo "::notice ::Spec changes detected - please review the changes"
+              exit 0
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-diffs
+          path: |
+            spec-check/diff-*
+            spec-check/*.html
+
+  # Job: Deploy and test the kit
+  deploy:
+    needs: [spec-tests, spec-check]
+    runs-on: ubuntu-latest
+    environment: ci-testing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Set up Infrastructure
+        uses: ./.github/actions/setup-infra
+        with:
+          iaas: vsphere
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          gcp_service_account_key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          vsphere_username: ${{ secrets.VSPHERE_USERNAME }}
+          vsphere_password: ${{ secrets.VSPHERE_PASSWORD }}
+          
+      - name: Deploy and Test
+        env:
+          DEPLOY_ENV: ci-vsphere-baseline
+          CI_ROOT: "ci"
+          GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
+          GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
+          GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          BOSH_CLIENT: ${{ secrets.BOSH_CLIENT }}
+          BOSH_CLIENT_SECRET: ${{ secrets.BOSH_CLIENT_SECRET }}
+          BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
+          BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
+          SECRETS_SEED_DATA: ${{ secrets.SECRETS_SEED_DATA }}
+        run: |
+          sudo chmod -R a+rwx ./**
+          ./ci/scripts/test-deployment.sh
+
+  # Job: Prepare release (only on develop branch)
+  prepare-release:
+    if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
+    needs: [deploy, build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: spec-diffs
+          
+      - name: Generate Release Notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./ci/scripts/generate-release-notes.sh \
+            "${{ needs.build-kit.outputs.version }}"
+            "${{ github.workspace }}/previous-tag" \
+          "release-notes.md"
+            
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: release/${{ needs.build-kit.outputs.version }}
+          title: Release v${{ needs.build-kit.outputs.version }}
+          body: |
+            Release preparation for version ${{ needs.build-kit.outputs.version }}
+            
+            Generated release notes and spec diffs attached.
+          labels: release
+          base: main
+
+  # Job: Create GitHub Release (only on main branch)
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy, build-kit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kit-build
+          
+      - name: Download Spec Diffs
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-diffs
+          path: spec-diffs
+          
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
+        with:
+          # Release configuration
+          tag_name: v${{ needs.build-kit.outputs.version }}
+          name: v${{ needs.build-kit.outputs.version }}
+          body_path: release-notes/release-notes.md
+          files: |
+            *.tar.gz
+            spec-diffs/*
+          prerelease: false
+          
+      - name: Notify Success
+        if: success()
+        uses: ./.github/actions/notify
+        with:
+          message: "Successfully released v${{ needs.build-kit.outputs.version }}"
+          status: success
+
+$$--GLUE--$$
+.\.gitignore
+$$--GLUE--$$
+*.tar.gz
+
+$$--GLUE--$$
+.\CONDUCT.md
+$$--GLUE--$$
+# Code of Conduct
+
+## Our Pledge
+
+In the interest of fostering an open and welcoming environment, we as
+contributors and maintainers pledge to making participation in our project and
+our community a harassment-free experience for everyone, regardless of age, body
+size, disability, ethnicity, gender identity and expression, level of experience,
+nationality, personal appearance, race, religion, or sexual identity and
+orientation.
+
+
+
+## Our Standards
+
+Examples of behavior that contributes to creating a positive environment
+include:
+
+  - Using welcoming and inclusive language
+
+  - Being respectful of differing viewpoints and experiences
+
+  - Gracefully accepting constructive criticism
+
+  - Focusing on what is best for the community
+
+  - Showing empathy towards other community members
+
+
+Examples of unacceptable behavior by participants include:
+
+  - The use of sexualized language or imagery and unwelcome sexual
+    attention or advances
+
+  - Trolling, insulting/derogatory comments, and personal or
+    political attacks
+
+  - Public or private harassment
+
+  - Publishing others' private information, such as a physical or
+    electronic address, without explicit permission
+
+  - Other conduct which could reasonably be considered
+    inappropriate in a professional setting
+
+
+
+## Our Responsibilities
+
+Project maintainers are responsible for clarifying the standards
+of acceptable behavior and are expected to take appropriate and
+fair corrective action in response to any instances of
+unacceptable behavior.
+
+Project maintainers have the right and responsibility to remove,
+edit, or reject comments, commits, code, wiki edits, issues, pull
+requests, and other contributions that are not aligned to this
+Code of Conduct, or to ban temporarily or permanently any
+contributor for other behaviors that they deem inappropriate,
+threatening, offensive, or harmful.
+
+
+
+## Scope
+
+This Code of Conduct applies both within project spaces and in
+public spaces when an individual is representing the project or
+its community. Examples of representing a project or community
+include using an official project e-mail address, posting via an
+official social media account, or acting as an appointed
+representative at an online or offline event. Representation of a
+project may be further defined and clarified by project
+maintainers.
+
+
+
+## Enforcement
+
+Instances of abusive, harassing, or otherwise unacceptable
+behavior may be reported by contacting the project team at
+conduct@starkandwayne.com. All complaints will be reviewed and
+investigated and will result in a response that is deemed
+necessary and appropriate to the circumstances. The project team
+is obligated to maintain confidentiality with regard to the
+reporter of an incident.  Further details of specific enforcement
+policies may be posted separately.
+
+Project maintainers who do not follow or enforce the Code of
+Conduct in good faith may face temporary or permanent
+repercussions as determined by other members of the project's
+leadership.
+
+
+
+## Attribution
+
+This Code of Conduct is adapted from the [Contributor Covenant][homepage], version 1.4,
+available at [http://contributor-covenant.org/version/1/4][version]
+
+[homepage]: http://contributor-covenant.org
+[version]: http://contributor-covenant.org/version/1/4/
+
+$$--GLUE--$$
+.\CONTRIBUTING.md
+$$--GLUE--$$
+# Contributing
+
+When contributing to this repository, please first discuss the
+change you wish to make via issue, email, or any other method with
+the owners of this repository before making a change.
+
+Please note we have a Code of Conduct, please follow it in all
+your interactions with the project.
+
+## Pull Request Process
+
+1. Ensure that the Kit still compiles, and can be deployed using a
+   recent vintage of the Genesis CLI.
+
+2. Provide the context of the discussion with the repository
+   owners and core team members that lead to the submission of the
+   pull request.  This may be as simple as a link to an issue.
+
+3. After review and approval, your Pull Request will be merged by
+   a repository owner.
+
+$$--GLUE--$$
+.\LICENSE
+$$--GLUE--$$
+The MIT License (MIT)
+
+Copyright (c) 2017 James Hunt
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to
+deal in the Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software..
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
+
+$$--GLUE--$$
+.\MANUAL.md
+$$--GLUE--$$
+# SHIELD Genesis Kit Manual
+
+The **SHIELD Genesis Kit** deploys the SHIELD Cloud Data
+Protection suite, to allow you to back up your sensitive cloud
+infrastructure and application data.
+
+# Base Parameters
+
+- `shield_static_ip` - The static IP address of the SHIELD core.
+  This must be designated as static in the chosen network's cloud
+  config definition.
+
+- `external_domain` - Optional; the DNS name set up for the shield
+  server. This is used for certificate validation if present.
+
+- `installation` - The name of the SHIELD installation, as
+  reported from inside the SHIELD UI.
+  Defaults to `S.H.I.E.L.D.`
+
+## HTTP(S) Proxy Parameters
+
+- `http_proxy` - (Optional) URL of an HTTP proxy to use for any
+  outbound HTTP (non-TLS) communication.
+
+- `https_proxy` - (Optional) URL of an HTTP proxy to use for any
+  outbound HTTPS (TLS) communication.
+
+- `no_proxy` - A list of IPs, FQDNs, partial domains, etc. to
+  skip the proxy and connect to directly.  This has no effect if
+  the `http_proxy` and `https_proxy` are not set.
+
+  This is currently encoded as a comma-separated string, **not**
+  a YAML list.
+
+## Sizing and Deployment Parameters
+
+- `shield_disk_pool` - The persistent disk pool that Vault VMs will
+  use.  This pool must exist in your cloud config.  Defaults to
+  `shield`.
+
+- `shield_vm_type` - What type of VM to deploy.  This type must
+  exist in your cloud config.  Defaults to `small`.
+
+- `shield_network` - What network to deploy SHIELD into.  This
+  network must be defined in your cloud config.  Defaults to
+  `shield`.
+
+- `stemcell_os` - The operating system you want to deploy SHIELD
+  on.  This defaults to `ubuntu-xenial`.
+
+- `stemcell_version` - The version of the stemcell to deploy.
+  Defaults to `latest`, which is usually what you want.
+
+- `availability_zone` - What BOSH availability zone to deploy
+  SHIELD into.  The chosen network must have at least one
+  subnet in this zone, and the zone itself must be defined in your
+  cloud config.  Defaults to `z1`.
+
+  **Note**: This Genesis Kit only deploys a single-instance SHIELD
+  so availability zone configuration will not bring high
+  availability to the deployment.
+
+# Available Features
+
+- `oauth` - Enables Oauth2 SHIELD authentication to a backend like
+  Github or UAA.  See the _Examples_ section for more details on
+  properly configuring Github and UAA providers.
+
+- `secure` - Configure the admin user account.  By default, the admin user
+  account credentials are static.  Use this feature to have a password
+  generated automatically and optionally specify an alternative username with
+  by setting `params.admin_username` in the environment file.  The password
+  can then be rotated as needed by your company's security policy.
+
+# Cloud Configuration
+
+By default, SHIELD uses the following VM types/networks/disk pools from your
+Cloud Config. Feel free to override them in your environment, if you would
+rather they used entities already existing in your Cloud Foundry:
+
+```
+params:
+  shield_network:   shield
+  shield_disk_pool: shield # should be at least 1GB
+  shield_vm_type:   small # VMs should have at least 1 CPU, and 1GB of memory
+```
+
+# Available Addons
+
+- `visit` - Open up the SHIELD Web UI in your browser (only works
+  on macOS, currently).
+
+- `runtime-config` - Generate a good starting point configuration
+  for deploying the SHIELD agent via BOSH as an addon.
+
+# Examples
+
+To use custom cloud config types:
+
+```
+---
+kit:
+  name:    shield
+  version: 0.3.0
+
+genesis:
+  env: acme-us-east-1-prod
+
+params:
+  shield_static_ip: 10.0.0.7
+  shield_network:   core-infra
+  shield_disk_pool: backups
+  shield_vm_type:   std.small.1c.2gb
+```
+
+To enable Github as an Oauth2 authentication provider:
+
+```
+---
+kit:
+  name:    shield
+  version: 0.3.0
+  features:
+    - oauth2
+
+genesis:
+  env: acme-us-east-1-dev
+
+params:
+  shield_static_ip: 10.0.0.7
+  authentication:
+    - name:       Github
+      identifier: github
+      backend:    github
+      properties:
+        client_id:     <client-id>
+        client_secret: <client-secret>
+        mapping:
+          - github: starkandwayne  # <-- github org name
+            tenant: starkandwayne  # <-- shield tenant name
+            rights:
+              - team: Owners       # <-- github team name
+                role: admin        # <-- shield role name
+              - team: Engineering  #   (first match wins)
+                role: engineer
+              - role: operator     # = (default match)
+          - github: starkandwayne
+            tenant: SYSTEM
+            rights:
+              - team: Owners
+                role: admin
+```
+
+To enable Cloud Foundry UAA as an Oauth2 authentication provider:
+
+```
+---
+kit:
+  name:    shield
+  version: 0.3.0
+  features:
+    - oauth2
+
+genesis:
+  env: acme-us-east-1-dev
+
+params:
+  shield_static_ip: 10.0.0.7
+  authentication:
+    - name:       UAA
+      identifier: uaa1
+      backend:    uaa
+      properties:
+        client_id:       <client-id>
+        client_secret:   <client-secret>
+        uaa_endpoint:    https://uaa.shield.10.10.10.10.netip.cc:8443
+        skip_verify_tls: true
+        mapping:
+          - tenant: UAA          # <-- shield tenant name
+            rights:
+              - scim: uaa.admin  # <-- uaa scim right
+                role: admin      # <-- shield role
+                                #   (first match wins)
+              - scim: cloud_controller.write
+                role: engineer
+              - role: operator   # = (default match)
+          - tenant: UAA Admins
+            rights:
+              - scim: uaa.admin
+                role: admin
+```
+
+Note that the "SYSTEM" tenant is used to apply rights and roles to
+SHIELD itself.
+
+# Caveats
+
+SHIELD requires mutual visibility with the hosts where its agents
+execute.  It is currently impossible for a SHIELD core to properly
+orchestrate a SHIELD Agent that exists behind a NAT gateway, in
+another sequestered network.
+
+# History
+
+Version 0.3.0 was the first version to support Genesis 2.6 hooks
+for addon scripts and `genesis info`.
+
+$$--GLUE--$$
+.\README.md
+$$--GLUE--$$
+SHIELD Genesis Kit
+==================
+
+This is a Genesis Kit for the [SHIELD Data Protection System][1],
+from [Stark & Wayne][2]. When using [genesis][3] to deploy this kit,
+you will get a fully-functional SHIELD deployment for backing up + restoring
+your data services.
+
+Quick Start
+-----------
+
+To use it, you don't even need to clone this repository!  Just run
+the following (using Genesis v2):
+
+```
+# create a shield-deployments repo using the latest version of the SHIELD kit
+genesis init --kit shield
+
+# create a shield-deployments repo using v1.0.0 of the SHIELD kit
+genesis init --kit shield/1.0.0
+
+# create a my-shield-configs repo using the latest version of the SHIELD kit
+genesis init --kit shield -d my-shield-configs
+```
+
+Once created, refer to the deployment repo's README for information on creating
+new environments + deploying them.
+
+Learn More
+----------
+
+For more in-depth documentation, check out the [manual][5].
+
+[1]: https://github.com/starkandwayne/shield
+[2]: https://starkandwayne.com
+[3]: https://github.com/starkandwayne/genesis
+[4]: https://github.com/cloudfoundry/uaa
+[5]: MANUAL.md
+
+$$--GLUE--$$
+.\ci\envs\ci-vsphere-baseline.yml
+$$--GLUE--$$
+---
+genesis:
+  env:   ci-vsphere-baseline
+
+params:
+  #network: shield
+  #vm_type: small
+  shield_static_ip: (( concat meta._ip_prefix "8.16" ))
+  installation:     S.H.I.E.L.D. CI/CD
+$$--GLUE--$$
+.\ci\scripts\build-kit.sh
+$$--GLUE--$$
+#!/bin/bash
+set -eu
+
+# Resource Directories
+export REPO_ROOT="git"
+export BUILD_ROOT="build"
+export CI_ROOT="git-ci"
+export VERSION_FROM="version/number"
+
+header() {
+	echo
+	echo "================================================================================"
+	echo "$1"
+	echo "--------------------------------------------------------------------------------"
+	echo
+}
+
+bail() {
+	echo >&2 "$*  Did you misconfigure Concourse?"
+	exit 2
+}
+test -n "${KIT_SHORTNAME:-}"  || bail "KIT_SHORTNAME must be set to the short name of this kit."
+test -n "${VAULT_URI:-}"      || bail "VAULT_URI must be set to an address for connecting to Vault."
+test -n "${VAULT_TOKEN:-}"    || bail "VAULT_TOKEN must be set to something; it will be used for connecting to Vault."
+
+test -f "${VERSION_FROM}"     || bail "Version file (${VERSION_FROM}) not found."
+VERSION=$(cat "${VERSION_FROM}")
+test -n "${VERSION}"          || bail "Version file (${VERSION_FROM}) was empty."
+
+header "Connecting to vault..."
+safe target da-vault "$VAULT_URI" -k
+echo "$VAULT_TOKEN" | safe auth token
+safe read secret/handshake
+
+check_dirs=()
+for dir in overlay manifests spec/results; do
+  [[ -d "$REPO_ROOT/$dir" ]] && check_dirs+=( "$REPO_ROOT/$dir/" )
+done
+if [[ ${#check_dirs[@]} -gt 0 ]] ; then
+  header "Checking SHA1s of specified components (not including bosh-deployment) ..."
+  out="$(eval "spruce merge --skip-eval $( \
+    grep -rl '^releases:' "${check_dirs[@]}" \
+    | sed -e "s/\\(.*\\)/<(spruce json \\1 | jq -r '{releases: [ \"(( merge on sha1 ))\", .releases[] ]}')/" |tr "\n" " " \
+  ) | spruce json | jq -r ." )"
+  echo "$out" | spruce merge | spruce json | "${CI_ROOT}/ci/scripts/check-sha1s"
+fi
+
+header "Building $KIT_SHORTNAME kit v$VERSION"
+genesis -C "$REPO_ROOT" compile-kit -v "$VERSION" -n "$KIT_SHORTNAME"
+
+mv "${REPO_ROOT}/${KIT_SHORTNAME}-${VERSION}.tar.gz" "$BUILD_ROOT/"
+
+echo
+echo "================================================================================"
+echo "SUCCESS!"
+exit 0
+
+$$--GLUE--$$
+.\ci\scripts\build-upstream-jobs.sh
+$$--GLUE--$$
+#!/bin/bash -
+set -ue
+base_dir="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "${base_dir}/pipeline/upstream/"
+
+_lookup() {
+ echo "${1}" | base64 --decode | jq -r "${2}"
+}
+
+# Read upstream.yml
+update_group=()
+upstream_details="$(spruce json "${base_dir}/settings.yml" | jq -r '.meta.upstream.bosh_releases//[] | .[] | @base64')"
+
+# For each release in upstream.yml,
+for release in $upstream_details ; do
+  name="$(_lookup "$release" .name)"
+  type="$(_lookup "$release" '.type//"bosh-io-release"')"
+  path="$(_lookup "$release" '.path//"manifests/releases/'"$name"'.yml"')"
+  repo="$(_lookup "$release" '.repository')"
+  if [[ $type == 'bosh-io-release' ]] ; then
+    source=$'\n'"      repository: $repo";
+  elif [[ $type == 'github-release' ]] ; then
+    owner="$(_lookup "$release" '.owner//""')"
+    if [[ -z "$owner" && "$repo" =~ / ]] ; then
+      owner="${repo%%/*}"
+      repo="${repo#*/}"
+    fi
+    source=$'\n'"      repository: $repo"$'\n'"      owner: $owner";
+
+    token="$(_lookup "$release" '.access_token//""')"
+    if [[ -n "$token" ]] ; then
+      source="$source"$'\n      access_token: "'"$token"'"'
+    fi
+  else
+    echo >&2 "Unknown resource type for $name upstream release: $type"
+    echo >&2 "Expecting one of: bosh-io-release, github-release"
+    echo >&2 "Update upstream.bosh-releases configuration in ci/settings.yml"
+    exit 1
+  fi
+  job="update-${name}-release"
+  release="${name}-release"
+
+  update_group+=( "$job" )
+
+  cat <<EOF >> "$base_dir/pipeline/upstream/update_${name}_release.yml"
+jobs:
+- (( append ))
+- name: $job
+  public: false
+  serial: true
+  serial_groups: [upstream-releases]
+  plan:
+  - do:
+    - in_parallel:
+      - { get: git,    trigger: false, passed: [spec-tests] }
+      - { get: git-ci, trigger: false  }
+      - get: $release
+        trigger: true
+        params:
+          tarball: false
+    - task: $job
+      file: git-ci/ci/tasks/update-release.yml
+      input_mapping: {bosh-release: $release}
+      params:
+        RELEASE_NAME:  $name
+        RELEASE_PATH:  $path
+        BRANCH:        (( grab meta.github.branch ))
+        GIT_EMAIL:     (( grab meta.git.email ))
+        GIT_NAME:      (( grab meta.git.name ))
+    - put: git
+      params:
+        merge: true
+        repository: git
+
+resources:
+  - (( append ))
+  - name: $release
+    type: $type
+    check_every: 24h
+    source: $source
+EOF
+
+done
+group_file="$base_dir/pipeline/upstream/update_group.yml"
+if [[ "${#update_group[@]}" -gt 0 ]] ; then
+  (
+  echo "groups:"
+  echo "- (( merge on name ))"
+  echo "- name: upstream"
+  echo "  jobs:"
+  echo "  - (( append ))"
+  for job in ${update_group[@]+"${update_group[@]}"} ; do
+    echo "  - $job"
+  done
+  ) >> "$group_file"
+elif [[ -f "$group_file" ]] ; then
+  rm -f "$group_file"
+fi
+
+$$--GLUE--$$
+.\ci\scripts\check-sha1s.sh
+$$--GLUE--$$
+#!/usr/bin/perl
+use strict;
+use warnings;
+use JSON::PP qw/decode_json/;
+
+my $rc = 0;
+my $data = decode_json(do { local $/; <> });
+for my $r (@{$data->{releases} || []}) {
+	chomp(my $sha1 = `curl -Lsk "$r->{url}" | sha1sum`);
+	$sha1 =~ s/ .*//;
+
+	if ($r->{sha1} eq $sha1) {
+		print "[ok] $r->{name} sha1 checkums are correct.\n";
+	} else {
+		print "[!!] $r->{name} sha1 checkums are INCORRECT.\n";
+		print "[!!]     the kit has '$r->{sha1}' (wrong)\n";
+		print "[!!]    actually got '$sha1' (correct)\n";
+		$rc = 1;
+	}
+}
+exit $rc;
+
+$$--GLUE--$$
+.\ci\scripts\compare-release-specs.sh
+$$--GLUE--$$
+#!/bin/bash
+set -ue
+
+# What branch is the comparison of the current working branch being compared against
+compare_branch="${1:-origin/}"
+check_dirs="spec/results manifests"
+
+orig_dir="$(pwd)"
+# needed because of when running locally or in ci
+ci_dir="../$(basename "$(pwd)")-ci"
+if [[ -d "$ci_dir" ]]; then
+  ci_dir="$(cd "$ci_dir" && pwd)"
+else
+  ci_dir="$orig_dir"
+fi
+
+release_files() {
+  for d in $check_dirs; do
+    grep -rl '^releases' "$d" 2>/dev/null || true
+  done
+}
+
+releases() {
+  eval "spruce merge --skip-eval $( \
+  release_files \
+  | sed -e "s/\\(.*\\)/\<(spruce json \\1 | jq -r '{releases: [ \"(( merge on sha1 ))\", .releases[] ]}')/" |tr "\n" " " \
+  ) | spruce merge | spruce json | jq -r ."
+}
+
+workdir="$(mktemp -d)"
+mkdir "$workdir/compare"
+cp -R "$(pwd)/.git" "$workdir/compare/"
+pushd "$workdir/compare" > /dev/null
+if ! git show -q "$compare_branch" &>/dev/null ; then
+  echo "The latest release ($compare_branch) is NOT an ancestor to this commit."
+  echo "This should never happen -- Cannot continue!"
+ exit 1
+fi
+git checkout -qf --detach "$compare_branch"
+prev_releases="$(releases)"
+popd > /dev/null
+rm -rf "$workdir/compare"
+
+curr_releases="$(releases)"
+
+prev_rel_names="$(echo "$prev_releases"| jq -r '.releases[] | .name' | sort | uniq)"
+curr_rel_names="$(echo "$curr_releases"| jq -r '.releases[] | .name' | sort | uniq)"
+
+removed=()
+while IFS='' read -r rel ; do
+  removed+=( "$rel" )
+done <<<"$(diff -p <(echo "$prev_rel_names") <(echo "$curr_rel_names") | grep '^- ' | sed -e 's/- //')"
+added=()
+while IFS='' read -r rel ; do
+  added+=( "$rel" )
+done <<<"$(diff -p <(echo "$prev_rel_names") <(echo "$curr_rel_names") | grep '^+ ' | sed -e 's/+ //')"
+
+unchanged=()
+changed=()
+while IFS='' read -r rel; do
+  prev_ver="$(echo "$prev_releases" | jq -r --arg r "$rel" \
+    '.releases | map(select(.name == $r) | .version) | sort | unique | if(.|length>0) then .|join(",") else "--none--" end' )"
+  if [[ "$prev_ver" == "--none--" ]] ; then continue ; fi
+  curr_ver="$(echo "$curr_releases" | jq -r --arg r "$rel" \
+    '.releases | map(select(.name == $r) | .version) | sort | unique | join(",")' )"
+  if [[ "$prev_ver" == "$curr_ver" ]] ; then
+    unchanged+=( "$rel $curr_ver" )
+  else
+    changed+=( "$rel $prev_ver $curr_ver" )
+  fi
+done <<< "${curr_rel_names[@]}"
+
+# Write diff outputs
+if [[ "${#removed[@]}" -gt 0 && -n "${removed[0]}" ]] ; then
+  echo "Removed Releases:"
+  for rel in "${removed[@]}" ; do
+    echo "  - $rel"
+  done
+  echo
+fi
+
+if [[ "${#unchanged[@]}" -gt 0 && -n "${unchanged[0]}" ]] ; then
+  echo "Unchanged Releases:"
+  for info in "${unchanged[@]}" ; do
+    read -r rel curr_ver <<<"$info"
+    echo "  - $rel ($curr_ver)"
+  done
+  echo
+fi
+
+if [[ "${#added[@]}" -gt 0 && -n "${added[0]}" ]] ; then
+  echo "Added Releases:"
+  for rel in "${added[@]}" ; do
+    echo "  - $rel"
+  done
+  echo
+fi
+
+if [[ "${#changed[@]}" -gt 0 && -n "${changed[0]}" ]] ; then
+  echo "Changed Releases:"
+  for info in "${changed[@]}" ; do
+    read -r rel prev_ver curr_ver <<<"$info"
+    echo "  - $rel ($prev_ver -> $curr_ver)"
+  done
+  echo
+
+  echo "Fetching spec diffs..."
+  if [ -f "${ci_dir}/ci/upstreamrepo.yml" ]; then
+    upstreamrepo=$(spruce json "${ci_dir}/ci/upstreamrepo.yml")
+  else
+    upstreamrepo='{"repos": []}'
+  fi
+  # TODO: do this in two phases -- first phase pull out all the non-compiled
+  #       versions, then run through with the compiled versions, picking up the
+  #       non-compiled version's git repo.  Also indicate if they are compiled
+  #       or not, and if so, what os is the target. (because that may change)
+  repos="$(
+    echo "$curr_releases" \
+    | jq --argjson gitrepos "$upstreamrepo" -r 'reduce .releases[] as {$name, $url, $sha1, $version} ({repos: []};
+        ($url
+        | if ($url | test("https?://s3(-.*)?.amazonaws.com")) then
+            ($gitrepos.repos | map(select(.name == $name))[0].repo)
+          elif ($url | test("https?://storage.googleapis.com")) then
+            ($gitrepos.repos | map(select(.name == $name))[0].repo)
+          elif ($url | test("https?://bosh.io")) then
+            ($url | sub("^.*/d/";"https://") | sub("\\?v=.*$";""))
+          elif ($url | test("https?://github.com")) then
+            ($url | sub("^.*http";"http") | sub("/releases/download/.*$";""))
+          else
+            $url
+          end
+        ) as $repo |
+        (.repos += [{$name,$repo}])
+    )')"
+
+  for info in "${changed[@]}" ; do
+    read -r rel prev_ver curr_ver <<<"$info"
+
+    #TODO: handle multiple versions (comma separated) -- right now we're just taking the first one with a repo.
+    #TODO: handle compiled releases better -- right now just skipping.
+    repo="$(echo "$repos" | jq -r --arg r "$rel" '.repos | map(select(.name == $r and .repo != null)) | .[0].repo//""' )"
+    [[ -n "$repo" ]] || continue
+    rel_dir="$workdir/releases/$rel"
+    mkdir -p "$rel_dir"
+    git -C "$rel_dir" init >/dev/null 2>&1 && \
+    git -C "$rel_dir" remote add origin -f "$repo" >/dev/null 2>&1 && \
+    git -C "$rel_dir" config core.sparseCheckout true >/dev/null 2>&1
+
+    echo "/jobs" > "$rel_dir/.git/info/sparse-checkout"
+
+    set +e
+    reponame=$(echo "${repo}" | grep github | cut -d "/" -f4-5)
+    set -e
+    if [[ -n ${reponame}  ]]; then
+      cmd=( curl --silent -L -H "Accept: application/vnd.github.v3+json" )
+      [[ -n "$GITHUB_AUTH_TOKEN" ]] && cmd+=( -H "Authorization: token $GITHUB_AUTH_TOKEN" )
+      cmd+=( "https://api.github.com/repos/${reponame}" )
+      branch=$( "${cmd[@]}" | jq -r .default_branch)
+    else
+      branch="master"
+    fi
+
+    git -C "$rel_dir" pull --depth 1 origin ${branch} > /dev/null 2>&1
+
+
+    mkdir -p "$workdir/compare-specs"
+    for v in "$prev_ver" "$curr_ver" ; do
+      set +e
+      git -C "$rel_dir" checkout -f "$v" >/dev/null 2>&1 || git -C "$rel_dir" checkout -f "v$v" >/dev/null 2>&1
+      set -e
+      #shellcheck disable=2181
+      if [[ "$?" == '0' ]] ; then
+        (cd "$rel_dir/jobs"; for x in * ; do
+          [[ -d "$workdir/compare-specs/$x" ]] || mkdir -p "$workdir/compare-specs/$x"
+          [[ -f "$x/spec" ]] && cp "$x/spec" "$workdir/compare-specs/$x/spec-$v"
+        done) > /dev/null 2>&1
+      else
+        echo "[ERROR] Cannot find version $v of release $rel"
+      fi
+    done
+    spec_changed=0
+    pushd "$workdir/compare-specs" >/dev/null
+    for job in * ; do
+      if [[ -f "$job/spec-$prev_ver" && -f "$job/spec-$curr_ver" ]] ; then
+        if ! diff -q "$job/spec-$prev_ver"  "$job/spec-$curr_ver" > /dev/null 2>&1; then
+          echo "[35;1m[$rel/job/$job][31;1m Change detected in spec file between $prev_ver and $curr_ver[0m"
+          spruce diff "$job/spec-$prev_ver" "$job/spec-$curr_ver" || true
+          spec_changed=1
+        fi
+      elif [[ -f "$job/spec-$prev_ver" || -f "$job/spec-$curr_ver" ]] ; then
+        spec_changed=1
+        [[ -f "$job/spec-$prev_ver" ]] || echo "[35;1m[$rel/job/$job][33;1m No spec found in previous version ($prev_ver)[0m"
+        [[ -f "$job/spec-$curr_ver" ]] || echo "[35;1m[$rel/job/$job][33;1m No spec found in current version ($curr_ver)[0m"
+      fi
+    done
+    [[ "$spec_changed" == "0" ]] && echo "[35;1m[$rel][32;1m No changes to spec files between $prev_ver and $curr_ver[0m"
+    popd >/dev/null
+    rm -rf "$workdir/compare-specs"
+    rm -rf "$workdir/releases/$rel"
+    echo
+  done
+else
+  echo "No Spec Changes to Consider"
+  echo
+fi
+[[ -n "$workdir" ]] && rm -rf "$workdir"
+
+$$--GLUE--$$
+.\ci\scripts\deploy.sh
+$$--GLUE--$$
+#!/bin/bash
+
+# Enable strict mode
+set -eu
+
+# Setup logging
+LOG_FILE="/tmp/deployment-$(date +%Y%m%d-%H%M%S).log"
+exec 1> >(tee -a "$LOG_FILE")
+exec 2> >(tee -a "$LOG_FILE" >&2)
+
+# Trap errors
+trap 'error_handler $? $LINENO $BASH_LINENO "$BASH_COMMAND" $(printf "::%s" ${FUNCNAME[@]:-})' ERR
+
+# Error handler function
+error_handler() {
+    local exit_code=$1
+    local line_no=$2
+    local bash_lineno=$3
+    local last_command=$4
+    local func_trace=$5
+    echo "Error occurred in script at line: $line_no"
+    echo "Last command executed: $last_command"
+    echo "Exit code: $exit_code"
+    echo "Function trace: $func_trace"
+    echo "Error timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+    exit "$exit_code"
+}
+
+# Enhanced logging function
+log() {
+    local level=$1
+    shift
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $*"
+}
+
+info() { log "INFO" "$@"; }
+warn() { log "WARN" "$@"; }
+error() { log "ERROR" "$@"; }
+debug() { log "DEBUG" "$@"; }
+
+# Resource Directories
+export CI_ROOT="git-ci"
+export DEPLOY_ENV="${DEPLOY_ENV:-"ci-baseline"}"
+export KEEP_STATE="${KEEP_STATE:-"false"}"
+export VERSION_FROM="version/number"
+export GIT_NAME="${GIT_NAME:-"Genesis CI Bot"}"
+export GIT_EMAIL="${GIT_EMAIL:-"genesis-ci@rubidiumstudios.com"}"
+
+# Enhanced header function with logging
+header() {
+    local msg=$1
+    info "=================================="
+    info "$msg"
+    info "=================================="
+    echo
+    echo "================================================================================"
+    echo "$msg"
+    echo "--------------------------------------------------------------------------------"
+    echo
+}
+
+# Enhanced bail function with logging
+bail() {
+    error "$*  Did you misconfigure Concourse?"
+    echo >&2 "$*  Did you misconfigure Concourse?"
+    exit 2
+}
+
+# Validate required environment variables
+validate_env_vars() {
+    info "Validating environment variables..."
+    
+    local required_vars=(
+        "KIT_SHORTNAME:short name of this kit"
+        "VAULT_URI:address for connecting to Vault"
+        "VAULT_TOKEN:token for connecting to Vault"
+    )
+    
+    local errors=0
+    for var in "${required_vars[@]}"; do
+        local var_name="${var%%:*}"
+        local var_desc="${var##*:}"
+        if [[ -z "${!var_name:-}" ]]; then
+            error "$var_name must be set to the $var_desc."
+            ((errors++))
+        else
+            debug "Found required variable $var_name"
+        fi
+    done
+    
+    # Validate TAG_ROOT and BUILD_ROOT
+    if [[ -n "${TAG_ROOT:-}" && -n "${BUILD_ROOT:-}" ]]; then
+        error "Cannot specify both 'TAG_ROOT' and 'BUILD_ROOT'"
+        ((errors++))
+    fi
+    if [[ -z "${TAG_ROOT:-}" && -z "${BUILD_ROOT:-}" ]]; then
+        error "Must specify one of 'TAG_ROOT' or 'BUILD_ROOT'"
+        ((errors++))
+    fi
+    
+    [[ $errors -gt 0 ]] && bail "Failed environment validation with $errors errors"
+    info "Environment validation successful"
+}
+
+# Version validation function
+validate_version() {
+    local version=$1
+    info "Validating version: $version"
+    local re='^[0-9]+\.[0-9]+\.[0-9]+'
+    if [[ ! "${version}" =~ $re ]]; then
+        error "Invalid version format: $version"
+        bail "Version must be in semver format (x.y.z)"
+    fi
+    debug "Version validation successful: $version"
+}
+
+# Setup workspace
+setup_workspace() {
+    info "Setting up workspace..."
+    WORKDIR="work/${KIT_SHORTNAME}-deployments"
+    
+    if [[ -n "${TAG_ROOT:-}" ]]; then
+        debug "Processing TAG_ROOT configuration"
+        if [[ ! -f "${TAG_ROOT}/.git/ref" ]]; then
+            error "Version reference file not found: ${TAG_ROOT}/.git/ref"
+            bail "Version reference for $TAG_ROOT repo not found."
+        fi
+        
+        VERSION="$(sed -e 's/^v//' < "${TAG_ROOT}/.git/ref")"
+        validate_version "$VERSION"
+        KIT="$KIT_SHORTNAME/$VERSION"
+        info "Using kit version from TAG_ROOT: $KIT"
+    else
+        debug "Processing BUILD_ROOT configuration"
+        if [[ ! -f "${VERSION_FROM}" ]]; then
+            error "Version file not found: ${VERSION_FROM}"
+            bail "Version file (${VERSION_FROM}) not found."
+        fi
+        
+        VERSION=$(cat "${VERSION_FROM}")
+        if [[ -z "${VERSION}" ]]; then
+            error "Empty version file: ${VERSION_FROM}"
+            bail "Version file (${VERSION_FROM}) was empty."
+        }
+        validate_version "$VERSION"
+        KIT="$(cd "$BUILD_ROOT" && pwd)/${KIT_SHORTNAME}-${VERSION}.tar.gz"
+        info "Using kit version from BUILD_ROOT: $KIT"
+    fi
+}
+
+# Git setup
+setup_git() {
+    header "Setting up git..."
+    info "Configuring git with name: $GIT_NAME and email: $GIT_EMAIL"
+    git config --global user.name "$GIT_NAME"
+    git config --global user.email "$GIT_EMAIL"
+    debug "Git configuration complete"
+}
+
+# Vault connection
+connect_vault() {
+    header "Connecting to vault..."
+    info "Targeting vault at: $VAULT_URI"
+    if ! safe target da-vault "$VAULT_URI" -k; then
+        error "Failed to target vault"
+        bail "Could not target vault at $VAULT_URI"
+    fi
+    
+    debug "Authenticating with vault token"
+    if ! echo "$VAULT_TOKEN" | safe auth token; then
+        error "Vault authentication failed"
+        bail "Could not authenticate with vault"
+    fi
+    
+    debug "Verifying vault connection"
+    if ! safe read secret/handshake; then
+        error "Failed to read vault test path"
+        bail "Could not verify vault connection"
+    fi
+    
+    info "Vault connection established successfully"
+}
+
+# Setup Genesis deployment
+setup_genesis() {
+    if [[ "${KEEP_STATE}" == "true" && -d "${WORKDIR}" ]] ; then
+        header "Updating Genesis deployment directory for $KIT_SHORTNAME v$VERSION..."
+        info "Checking Genesis version"
+        genesis -v
+        
+        if [[ -n "${TAG_ROOT:-}" ]] ; then
+            info "Fetching kit from TAG_ROOT"
+            genesis -C "${WORKDIR}" fetch-kit "${KIT}"
+        else
+            info "Copying kit from BUILD_ROOT"
+            cp -av "$KIT" "${WORKDIR}/.genesis/kits/"
+        fi
+    else
+        header "Setting up Genesis deployment directory for $KIT_SHORTNAME v$VERSION..."
+        info "Cleaning work directory"
+        rm -rf work/*
+        mkdir -p work/
+        
+        info "Checking Genesis version"
+        genesis -v
+        
+        info "Initializing Genesis with kit: $KIT"
+        genesis -C work/ init -k "$KIT" --vault da-vault
+    fi
+}
+
+# Copy and validate environment files
+setup_environments() {
+    header "Copying test environment YAMLs from $CI_ROOT/ci/envs..."
+    CI_PATH="$(cd "${CI_ROOT}" && pwd)"
+    info "CI path: $CI_PATH"
+    
+    debug "Copying environment files"
+    cp -av "$CI_PATH"/ci/envs/*.yml "${WORKDIR}/"
+    
+    if [[ ! -f "${WORKDIR}/${DEPLOY_ENV}.yml" ]]; then
+        error "Deployment environment file not found: ${DEPLOY_ENV}.yml"
+        bail "Environment $DEPLOY_ENV.yml was not found in the $CI_ROOT ci/envs/ directory"
+    fi
+    
+    info "Creating target configuration"
+    target="$(cat <<EOF
+---
+kit:
+  name: $KIT_SHORTNAME
+  version: $VERSION
+EOF
+)"
+    
+    echo
+    info "Merging kit configuration"
+    spruce merge --skip-eval "$CI_PATH/ci/envs/ci.yml" <(echo "$target") > "${WORKDIR}/ci.yml"
+    cat "${WORKDIR}/ci.yml"
+}
+
+# Main execution
+main() {
+    info "Starting deployment script"
+    debug "Script started with PID $$"
+    
+    validate_env_vars
+    setup_workspace
+    setup_git
+    connect_vault
+    setup_genesis
+    setup_environments
+    
+    export PATH="$PATH:$CI_PATH/ci/scripts"
+    info "Executing test deployment"
+    cd "${WORKDIR}"
+    BOSH=bosh "$CI_PATH/ci/scripts/test-deployment"
+    
+    info "Deployment completed successfully"
+    echo
+    echo "SUCCESS"
+}
+
+# Execute main function
+main "$@"
+
+$$--GLUE--$$
+.\ci\scripts\generate-release-notes.sh
+$$--GLUE--$$
+#!/usr/bin/env bash
+set -e
+set -o pipefail
+
+export VERSION_FROM="version/number"
+export GIT_NAME="${GIT_NAME:-"Genesis CI Bot"}"
+export GIT_EMAIL="${GIT_EMAIL:-"genesis-ci@rubidiumstudios.com"}"
+
+header() {
+  echo
+  echo "================================================================================"
+  echo "$1"
+  echo "--------------------------------------------------------------------------------"
+  echo
+}
+
+bail() {
+  echo >&2 "$*  Did you misconfigure Concourse?"
+  exit 2
+}
+test -n "${KIT_SHORTNAME:-}"         || bail "KIT_SHORTNAME must be set to the short name of this kit."
+test -n "${RELEASE_NOTES_FILE:-}"    || bail "RELEASE_NOTES_FILE must be set to the filename for the release notes."
+test -n "${RELEASE_NOTES_WEB_URL:-}" || bail "RELEASE_NOTES_WEB_URL must be set to the release notes gist edit URL."
+
+test -f "${VERSION_FROM}"            || bail "Version file (${VERSION_FROM}) not found."
+VERSION=$(cat "${VERSION_FROM}")
+test -n "${VERSION}"                 || bail "Version file (${VERSION_FROM}) was empty."
+
+git-ci/ci/scripts/release-notes "$VERSION" "git" "git-latest-tag" "release-notes/$RELEASE_NOTES_FILE"
+cat "release-notes/$RELEASE_NOTES_FILE"
+
+header "Uploading the release notes"
+
+git config --global user.name  "$GIT_NAME"
+git config --global user.email "$GIT_EMAIL"
+
+git -C release-notes add "$RELEASE_NOTES_FILE"
+git -C release-notes commit -m "Updated release notes for $KIT_SHORTNAME-genesis-kit v$VERSION"
+
+echo $'\n'"The release notes can be edited at ${RELEASE_NOTES_WEB_URL}"
+
+$$--GLUE--$$
+.\ci\scripts\release-notes.sh
+$$--GLUE--$$
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use YAML qw(Load LoadFile);
+use JSON::PP qw(decode_json);
+use File::Find;
+use FindBin;
+
+sub header {
+	print  STDERR  "\n================================================================================\n";
+	printf STDERR  "%s", join(' ',@_);
+	print  STDERR  "\n--------------------------------------------------------------------------------\n\n";
+}
+
+sub bail {
+	print STDERR "\n";
+	printf STDERR @_;
+	print STDERR "\nDid you misconfigure Concourse?\n\n";
+	exit 2;
+}
+
+sub uniq {
+	my %items;
+	$items{$_} = 1 for (@_);
+	sort keys %items;
+}
+
+sub get_new_commits {
+	my ($path, $since_commit) = @_;
+	my %lookup = (
+		author => '%aN',
+		author_email => '%aE',
+		author_date => '%at',
+		author_since => '%ar',
+		committer => '%cN',
+		committer_email => '%cE',
+		commit_date => '%ct',
+		commit_since => '%cr',
+		body => '%b'
+	);
+	my @commits = map {
+		my ($c,@s) = split(' ');
+		{commit => $c, subject => join(' ', @s)}
+	} qx(git -C "$path" log --reverse $since_commit...HEAD --pretty=format:'%H %s');
+
+	print STDERR "  - fetching commit details";
+	for my $commit (@commits) {
+		print STDERR '.';
+		for my $detail (keys %lookup) {
+			$commit->{$detail} = join("", qx(git -C "$path" log -n1 --pretty=format:'$lookup{$detail}' $commit->{commit}));
+			chomp $commit->{$detail};
+		}
+	}
+	print STDERR "\n";
+	return @commits;
+}
+
+sub get_latest_commit_ref {
+	my ($path) = @_;
+	chomp(my $ref = qx(git -C $path rev-parse HEAD));
+	$ref
+}
+
+sub get_latest_commit_tag {
+	my ($path) = @_;
+	my $tag;
+	if (-f "$path/.git/ref") {
+		$tag = qx(cat "$path/.git/ref");
+	} else {
+		$tag = qx(git -C $path describe --tag --abbrev=0);
+	}
+	chomp $tag;
+	return $tag
+}
+
+sub parse_commits {
+	my ($path, $last_release_path) = @_;
+	my @commits = get_new_commits($path, get_latest_commit_ref($last_release_path));
+
+	# Remove all merges with no bodies
+	@commits = grep {$_->{body} || $_->{subject} !~ /^Merge .* into .*/} @commits;
+
+	my $last_update;
+  my $updates=0;
+	unless ($ENV{NO_UPSTREAM_SYNC}) {
+		print STDERR "  - determining upstream synchronization\n";
+		@commits = grep {
+			if ($_->{subject} =~ /^Release ([^\/]*)\/([^ ]*) updated to version (.*)$/) {
+				$last_update = $_; $updates++; 0;
+			} else {
+				1;
+			}
+		} @commits;
+	}
+
+	my %messages;
+	if ($last_update) {
+		$last_update->{subject} =~ /^Release ([^\/]*)\/([^ ]*) updated to version (.*)$/;
+		$messages{'Upstream Convergence'} = [
+			sprintf(
+				'* Synchronized embedded %s to [@%s](https://github.com/%s/%s/tree/%s)',
+				$2, $3, $1, $2, $3
+			)
+		];
+	}
+	print STDERR "  - parsing commits for release notes.";
+	my $re=qr/(?:(?:\A|\n\n)\[([^\]\n]*)\]\n\n)/;
+	my ($header,$note,@data);
+	for my $commit (@commits) {
+		$commit->{body} =~ s/\r//g; # Remove windows CR characters
+		(undef, @data) = split($re, $commit->{body}||'');
+		print STDERR (@data ? "!" : ".");
+		while (@data) {
+			$commit->{used} = 1;
+			($header, $note, @data) = @data;
+			# Notes can be stopped with a --- on a new line
+			($note) = split("\n+---",$note);
+			if ($note !~ /\* /) {
+				# Auto-bullet
+				$note = "* ".join("\n  ",split("\n", $note));
+			}
+			$messages{$header} ||= [];
+			push @{$messages{$header}}, $note
+		}
+	}
+	print STDERR "\n";
+	my @entries;
+	push(@entries, "# $_\n\n".join("\n\n",@{$messages{$_}})) for (sort keys %messages);
+	my $release_notes = join("\n\n", @entries);
+	return ($release_notes, \@commits); # TBD: Maybe filter out commits that contained release notes
+}
+
+sub get_releases {
+	my ($path) = @_;
+	my $filter = "$path/spec/results/*.yml";
+	my @entries = qx(for x in $filter ; do spruce json \$x | jq -r '.releases[] | "\\(.name) \\(.version) \\(.url)"' 2>/dev/null ; done | sort | uniq);
+	my %releases;
+	for my $entry (@entries) {
+		my ($release, $version, $url) = split(' ',$entry);
+		push( @{$releases{$release}{$version} ||= []}, $url);
+	}
+	return \%releases;
+}
+
+my @months = qw(ignored January February March April May June July August September October November December);
+sub github {
+	my ($org, $repo, $versions, $type, $orig_url) = @_;
+	my ($url, $day, $mon, $year, $out, $tag);
+
+	unless ($org && $repo) {
+		if ($orig_url =~ m|https://bosh.io/d/github.com/([^/]*)/([^/]*)\?v=(.*)$|) {
+			$org = $1;
+			$repo = $2;
+		} elsif ($orig_url =~ m|https://github.com/([^/]*)/([^/]*)/releases|) {
+			$org = $1;
+			$repo = $2;
+		}
+		return ("-","") unless ($org && $repo);
+	}
+
+	# Try release - the preferred method
+	my $lookup_url="https://api.github.com/repos/$org/$repo/releases";
+	for (@$versions) {
+		$tag = $_;
+		$out = qx(curl -Ls -u "$ENV{GITHUB_ACCESS_TOKEN}:" "$lookup_url" | jq -r --arg t "$tag" '.[] | select(.tag_name == \$t)');
+		last if $out;
+	}
+	if ($out) {
+		printf STDERR "    - $org/$repo release $tag\n";
+		my $data = decode_json($out);
+		$url = $data->{html_url} || '';
+		return ('-', $url) unless $data->{published_at};
+		($year, $mon, $day) = ($data->{published_at} =~ m/^(\d{4})-(\d{2})-(\d{2})/);
+	} else {
+		# Next try tag
+		my $lookup_url="https://api.github.com/repos/$org/$repo/tags";
+		$out = qx(curl -Ls -u "$ENV{GITHUB_ACCESS_TOKEN}:" "$lookup_url");
+		my $target_tag;
+		if ($out) {
+			my $tags = decode_json($out);
+			for (@$versions) {
+				$tag = $_;
+				$target_tag = (grep {$_->{name} eq $tag} @$tags)[0];
+				last if $target_tag;
+			}
+		}
+		if ($target_tag) {
+			printf STDERR "    - $org/$repo tag $tag\n";
+			my $commit_url = $target_tag->{commit}{url};
+			$out = qx(curl -Ls -u "$ENV{GITHUB_ACCESS_TOKEN}:" "$commit_url");
+			my $data = decode_json($out);
+			($url = $data->{html_url}) =~ s#/commit/#/tree/#;
+			($year, $mon, $day) = ($data->{commit}{author}{date} =~ m/^(\d{4})-(\d{2})-(\d{2})/);
+
+		} else {
+			printf STDERR "    - $org/$repo version $tag not found!\n";
+			return ('-','');
+		}
+	}
+	return ("$day $months[$mon] $year", $url);
+}
+
+sub calculate_software_updates {
+	my ($path, $last_path) = @_;
+	printf STDERR "  - retrieving current releases found by spec tests...\n";
+	my $release_candidate_releases = get_releases($path);
+
+	printf STDERR "  - retrieving previous releases found by spec tests...\n";
+	my $last_release_releases = get_releases($last_path);
+
+	printf STDERR "  - checking ci/upstream.yml for more details...\n";
+	my $upstream = LoadFile($FindBin::Bin."/../upstream.yml");
+	my $sections = $upstream->{sections} || [];
+	my $default_section = (map {$_->{name}} grep {$_->{default}} @$sections)[0] || '-';
+	delete $upstream->{sections};
+
+	my %found;
+	print STDERR "  - retrieving release details:\n";
+	for my $name (uniq(keys %$release_candidate_releases, keys %$last_release_releases)) {
+
+		my @new_versions = keys %{$release_candidate_releases->{$name}||{}};
+		my @old_versions = keys %{$last_release_releases->{$name}||{}};
+
+		#There should never be more than one version in a release
+		# bail(
+		# 	"Somehow there are multiple versions of %s (%s) in release candidate",
+		# 	$name, join(', ',@new_versions)
+		# ) if (@new_versions > 1);
+		# bail(
+		# 	"Somehow there are multiple versions of %s (%s) in last release (%s)",
+		# 	$name, join(', ',@old_versions), get_latest_commit_tag($last_path)
+		# ) if (@old_versions > 1);
+		
+		next unless scalar(@new_versions);
+		for my $version (@new_versions) {
+
+			my $section = (grep {defined($upstream->{$_}{$name})} keys(%$upstream))[0] || $default_section;
+			for my $url (@{$release_candidate_releases->{$name}{$version} || []}) {
+				my ($type,$target);
+				if ($url =~ /$name-$version-([^-]*(?:-[^0-9][^-]*)*)-(\d*(?:\.\d*)*)-/) {
+					$type = 'compiled';
+					$target = "$1\@$2";
+				} else {
+					$type = 'source';
+				}
+				my @prefixes = defined($upstream->{$section}{$name}{tag_prefix}) ? ($upstream->{$section}{$name}{tag_prefix}) : ('v','');
+				my @suffixes = ($version =~ /^\d+$/) ? ('','.0','.0.0') : ('');
+
+				$found{$section} ||= {};
+				unless (defined($found{$section}{"$name/$version"})) {
+					my ($date,$release_url) = github(
+						$upstream->{$section}{$name}{org},
+						$upstream->{$section}{$name}{repo},
+						[map {my $p = $_; map {$p.$version.$_} @suffixes} @prefixes],
+						$upstream->{$section}{$name}{type},
+						$url
+					);
+					$found{$section}{"$name/$version"} = {
+						name => $name,
+						version => $version,
+						url => $release_url,
+						date => $date,
+						form => [],
+						label => $upstream->{$section}{$name}{label},
+						changed => (! scalar(@old_versions)) ? "NEW" :
+						           scalar(grep {$version eq $_} @old_versions) ? '' :
+						           sprintf('[X](## "was %s")', join(', ',@old_versions))
+					};
+				}
+				push(@{$found{$section}{"$name/$version"}{form}}, "compiled: $target") if $type eq 'compiled';
+				push(@{$found{$section}{"$name/$version"}{form}}, "source") if $type eq 'source';
+			}
+		}
+	}
+
+	push(@$sections, {name => '-', label => "Other Components"}) if (defined($found{'-'}));
+
+	my $software_notes = "# Software Components\n";
+	for (@$sections) {
+		my $s = $_->{name};
+		my $l = $_->{label} || uc($s)." Components";
+		$software_notes .=
+			"\n## $l\n\n".
+			"| Release | Version | Release Date | Type | Changed |\n".
+			"| ------- | ------- | ------------ | ---- | :-----: |\n";
+		for my $r (sort keys %{$found{$s}}) {
+			my $c = $found{$s}{$r};
+			$c->{label} ||= $c->{name};
+			$software_notes .= sprintf("| %s | %s | %s | %s | %s |\n",
+				$c->{label},
+				$c->{url} ? sprintf("[%s](%s)", $c->{version}, $c->{url}) : $c->{version},
+				$c->{date},
+				join("<br>", sort @{$c->{form}}),
+				$c->{changed}
+			);
+		}
+	}
+
+	return $software_notes;
+}
+
+sub build_commit_summaries {
+	my ($commits,$last_release, $url) = @_;
+	my $summary =
+		"---8<--- This line and everything below will be ignored ---8<---\n\n".
+		"### Raw commit messages since $last_release (oldest to latest)\n";
+
+	for (@$commits) {
+		$summary .= sprintf(
+			"\n\n\n----\n#### %s\n> *[%s](%s)*\n> *authored %s by %s (<%s>)*\n",
+			$_->{subject}, $_->{commit}, "$url/commit/$_->{commit}",
+			$_->{author_since}, $_->{author}, $_->{author_email}
+		);
+		$summary .= sprintf(
+			"> *committed %s by %s (<%s>)*\n",
+			$_->{commit_since}, $_->{committer}, $_->{committer_email}
+		) if $_->{author} ne $_->{committer};
+		$summary .= sprintf("\n```markdown\n%s\n```\n", $_->{body}) if $_->{body};
+	}
+
+	return $summary;
+}
+
+# ------------------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------------------
+my ($version, $rc_path, $last_release_path, $notes_path)=@ARGV;
+
+# Required Environment Variables
+my @missing = grep {! defined($ENV{$_->[0]})} (
+	['GITHUB_ACCESS_TOKEN',    'Access token needed to retrieve information about releases on Github'],
+);
+bail "[ERROR] Missing the following required environment variables:\n%s", join("", map {sprintf "- %s: %s\n", @{$_}} @missing)
+	if (@missing);
+
+my $last_release = get_latest_commit_tag($last_release_path);
+
+header "Building Release Notes from commit messages since $last_release";
+my ($release_notes,$commits) = parse_commits($rc_path, $last_release_path);
+
+my $software_updates;
+unless ($ENV{NO_RELEASE_VERSIONS}) {
+	header "Calculating Release Changes since $last_release";
+	$software_updates = calculate_software_updates($rc_path,$last_release_path);
+}
+
+qx(git -C $rc_path remote get-url origin) =~ /git\@github.com:(.*)$/;
+my $commit_summaries = build_commit_summaries($commits, $last_release, "https://github.com/$1");
+
+open(NOTES, '>', "$notes_path")
+	or bail "Cannot open $notes_path for writing.";
+
+printf NOTES "<!--- Release Notes for v%s -- Do not move --->\n%s\n\n%s\n%s",
+  $version, $release_notes, $software_updates, $commit_summaries;
+close NOTES;
+
+exit 0;
+
+$$--GLUE--$$
+.\ci\scripts\release.sh
+$$--GLUE--$$
+#!/bin/bash
+#
+# ci/scripts/shipit
+#
+# Script for generating Github release / tag assets
+# and managing release notes for a BOSH Release pipeline
+#
+# author:  James Hunt <james@niftylogic.com>
+# created: 2016-03-30
+# shellcheck disable=2291
+
+set -eu
+
+header() {
+	echo
+	echo "================================================================================"
+	echo "$1"
+	echo "--------------------------------------------------------------------------------"
+	echo
+}
+
+bail() {
+	echo >&2 "$*  Did you misconfigure Concourse?"
+	exit 2
+}
+export REPO_ROOT="git"
+export BUILD_ROOT="build"
+export RELEASE_NOTES_ROOT="release-notes"
+export VERSION_FROM="version/number"
+[[ "${PRERELEASE:-0}" =~ (0|f|false|n|no) ]] && PRERELEASE=""
+
+
+test -f "${VERSION_FROM}"     || bail "Version file (${VERSION_FROM}) not found."
+VERSION=$(cat ${VERSION_FROM})
+test -n "${VERSION}"          || bail "Version file (${VERSION_FROM}) was empty."
+
+test -n "${DEVELOP_BRANCH:-}" || bail "DEVELOP_BRANCH must be set to the development Git repository branch."
+test -n "${RELEASE_BRANCH:-}" || bail "RELEASE_BRANCH must be set to the main Git repository branch."
+
+if [[ -n "${PRERELEASE}" ]] ; then
+	RELEASE_NOTES_PATH="pre-release-notes"
+	cat <<EOF > "$RELEASE_NOTES_PATH"
+<!--- Release Notes for v${VERSION} -- Do not move --->
+This is a prerelease - please see commit messages for changes
+EOF
+else 
+  test -n "${GIT_EMAIL:-}"      || bail "GIT_EMAIL must be set to an email address to use for Git commits."
+  test -n "${GIT_NAME:-}"       || bail "GIT_NAME must be set to something; it will be used for Git commits."
+  test -n "${RELEASE_ROOT:-}"   || bail "RELEASE_ROOT must be set to the output directory where release artifacts should go."
+  test -n "${RELEASE_NOTES:-}"  || bail "RELEASE_NOTES must be set to the filename of the release notes."
+  RELEASE_NOTES_PATH="${RELEASE_NOTES_ROOT}/${RELEASE_NOTES}"
+  test -f "${RELEASE_NOTES_PATH}" || \
+    bail "Release notes file (${RELEASE_NOTES_PATH}) not found."
+fi
+
+test -n "${KIT_SHORTNAME:-}"  || bail "KIT_SHORTNAME must be set to the short name of this kit."
+test -n "${GITHUB_OWNER:-}"   || bail "GITHUB_OWNER must be set to the name of the Github user or organization that owns the Git repository."
+echo "Environment OK"
+
+###############################################################
+header "Assembling Github Release Artifacts..."
+mkdir -p "${RELEASE_ROOT}/artifacts"
+echo "v${VERSION}"           "-> ${RELEASE_ROOT}/tag"
+echo "v${VERSION}"            > "${RELEASE_ROOT}/tag"
+echo "v${VERSION}"           "-> ${RELEASE_ROOT}/name"
+echo "v${VERSION}"            > "${RELEASE_ROOT}/name"
+if [[ -n "$PRERELEASE" ]] ; then
+  echo "$(cat git/.git/ref)" "-> ${RELEASE_ROOT}/commit (pre-release)"
+  cp    git/.git/ref            "${RELEASE_ROOT}/commit"
+fi
+cp -av "${BUILD_ROOT}"/*.tar.gz "${RELEASE_ROOT}/artifacts"
+
+if [[ -d spec-check ]] ; then
+  if ! grep "No Spec Changes to Consider" spec-check/diff-* ; then
+    echo spec-check/diff-* "-> ${RELEASE_ROOT}/artifacts/spec-diffs.html"
+    cat spec-check/diff-* | aha > "${RELEASE_ROOT}/artifacts/spec-diffs.html"
+  else
+    echo "spec-check -> no changes in specs to release"
+  fi
+fi
+
+header "Release Notes for v${VERSION}"
+header="$(sed -i -e '1{w /dev/stdout' -e 'd}' "${RELEASE_NOTES_PATH}")"
+re="^<\!--- Release Notes for v${VERSION} -- Do not move --->$"
+if [[ "$header" =~ $re ]] ; then
+  sed -i  '/^---8<--- This line and everything below will be ignored ---8<---$/,$d' "${RELEASE_NOTES_PATH}"
+  cat "${RELEASE_NOTES_PATH}"
+  cp "${RELEASE_NOTES_PATH}" "$RELEASE_ROOT/notes.md"
+else
+  echo "Failed to find release notes for v$VERSION in $RELEASE_NOTES_PATH.  Found this instead:"
+  echo
+  echo "$header"
+  cat "${RELEASE_NOTES_PATH}"
+  exit 1
+fi
+
+if [[ -z "${PRERELEASE}" && "$DEVELOP_BRANCH" != "$RELEASE_BRANCH" ]] ; then
+  header "Fast-forward merge develop into ${RELEASE_BRANCH}"
+  pushd git-main &>/dev/null
+    git config --global user.name  "${GIT_NAME}"
+    git config --global user.email "${GIT_EMAIL}"
+    if ! git pull ../git -X theirs --no-edit --ff-only ; then
+      # if this fails, manual intervention is required.
+      echo >&2 \
+        $'\n'"'$RELEASE_BRANCH' release branch contains commits that the '$DEVELOP_BRANCH' does not have" \
+        $'\n'"Cannot push changes to release branch..."
+      exit 1
+    fi
+  popd &>/dev/null
+fi
+
+cat > "${NOTIFICATION_OUT:-notifications}/message" <<EOS
+New ${KIT_SHORTNAME} Genesis Kit v${VERSION} released. <https://github.com/${GITHUB_OWNER}/${KIT_SHORTNAME}-genesis-kit/releases/tag/v${VERSION}|Release notes>.
+EOS
+
+echo
+echo "--------------------------------------------------------------------------------"
+echo "SUCCESS"
+exit 0
+
+$$--GLUE--$$
+.\ci\scripts\smoketest-disabled.sh
+$$--GLUE--$$
+	genesis "do" "${DEPLOY_ENV}" -- smoketest
+
+$$--GLUE--$$
+.\ci\scripts\spec-check.sh
+$$--GLUE--$$
+#!/bin/bash
+set -e
+
+# Resource Directories
+REPO_ROOT="git"
+CI_ROOT="git-ci"
+TAG_ROOT="git-latest-tag"
+OUTPUT_ROOT="spec-check"
+
+CI_PATH="$(cd "${CI_ROOT}" && pwd)"
+TAG="$(cat "${TAG_ROOT}/.git/ref")"
+results_file="$(cd "${OUTPUT_ROOT}" && pwd)/diff-$(date -u +%Y%m%d%H%M%S)"
+
+# Run as a script to preserve color output
+export CI_PATH
+export TAG
+pushd "${REPO_ROOT}" &>/dev/null
+script --flush --quiet \
+  --return  "$results_file" \
+  --command '"${CI_PATH}"/ci/scripts/compare-release-specs "$TAG"'
+
+# Trim script header/footer (ignore error)
+sed -i '1d;$d' "$results_file" || true
+
+$$--GLUE--$$
+.\ci\scripts\test-addons.sh
+$$--GLUE--$$
+  safe_target_orig="$(safe target --json | jq -r .name)"
+  genesis "do" "${DEPLOY_ENV}" -- init
+  genesis "do" "${DEPLOY_ENV}" -- status
+  safe get secret/vault/seal/keys
+  safe target "$safe_target_orig"
+
+$$--GLUE--$$
+.\ci\scripts\test-deployment.sh
+$$--GLUE--$$
+#!/bin/bash
+set -eu
+
+DEPLOY_ENV=${DEPLOY_ENV:-"ci-baseline"}
+SKIP_FRESH=${SKIP_FRESH:-"false"}
+SKIP_REPLACE_SECRETS=${SKIP_REPLACE_SECRETS:-"false"}
+SKIP_DEPLOY=${SKIP_DEPLOY:-"false"}
+SKIP_SMOKE_TESTS=${SKIP_SMOKE_TESTS:-"false"}
+SKIP_CLEAN=${SKIP_CLEAN:-"false"}
+
+header() {
+  echo
+  echo "================================================================================"
+  echo "$1"
+  echo "--------------------------------------------------------------------------------"
+  echo
+}
+
+has_feature() {
+	genesis "$1" lookup kit.features 2>/dev/null | jq -e --arg feature "$2" '. | index($feature)' >/dev/null
+}
+
+is_proto() {
+	has_feature "$1" 'proto' # This will need to be changed in v2.8.0
+}
+
+cleanup_environment() {
+	local env="$1"
+	if [[ -f .genesis/manifests/$env-state.yml ]] ; then
+		header "Preparing to delete proto environment $env"
+		echo "Generating reference manifest..."
+		genesis "$env" manifest --no-redact > manifest.yml 2>/dev/null
+		echo $'\n'"Building BOSH variables file..."
+		genesis "${env}" lookup --merged bosh-variables > vars.yml 2>/dev/null
+		echo $'\n'"$env state file:"
+		echo "----------------->8------------------"
+		cat ".genesis/manifests/$env-state.yml"
+		echo "----------------->8------------------"
+		header "Deleting $DEPLOY_ENV environment..."
+		$BOSH delete-env --state ".genesis/manifests/$env-state.yml" --vars-file vars.yml manifest.yml
+		rm manifest.yml
+		rm vars.yml
+	else
+		echo "Cannot clean up previous $env environment - no state file found"
+	fi
+}
+
+cleanup_deployment() {
+	local deployment="$1"
+	echo "> deleting ${deployment}"
+	$BOSH -n -d "${deployment}" delete-deployment
+
+	for disk in $($BOSH disks --orphaned | grep "${deployment}" | awk '{print $1}'); do
+		echo
+		echo "Removing disk $disk"
+		$BOSH -n delete-disk "$disk"
+	done
+}
+
+cleanup() {
+	for deployment in "$@"; do
+		if is_proto "$deployment" ; then
+			cleanup_environment "$deployment"
+		else ( # run in a subshell to prevent pollution
+			eval "$(genesis bosh --connect "${deployment}" 2>/dev/null)"
+			cleanup_deployment "$deployment-${KIT_SHORTNAME}"
+		); fi
+	done
+}
+
+vault_path="$(genesis "$DEPLOY_ENV" lookup --env GENESIS_SECRETS_BASE)"
+exodus_path="$(genesis "$DEPLOY_ENV" lookup --env GENESIS_EXODUS_BASE)"
+vault_path="${vault_path%/}" # trim any trailing slash
+# -----
+
+header "Pre-test Cleanup"
+if [[ "$SKIP_FRESH" == "false" ]]; then
+	echo "Deleting any previous deploy"
+	cleanup "${DEPLOY_ENV}"
+else
+	echo "Skipping cleaning up from any previous deploy"
+fi
+
+if [[ -z "$vault_path" ]] ; then
+  echo >&2 "Failed to determine vault path.  Cannot continue!"
+  exit 2
+fi
+
+if [[ "$SKIP_REPLACE_SECRETS" == "false" ]] ; then
+	# Remove safe values
+	[[ -n "${vault_path:-}" ]] && \
+		echo "Removing existing secrets under $vault_path ..." && \
+		safe rm -rf "$vault_path" && true
+	[[ -n "${exodus_path:-}" ]] && \
+		echo "Removing existing exodus data under $exodus_path ..." && \
+		safe rm -rf "$exodus_path" && true
+
+	# Remove credhub values
+	if ! is_proto "$DEPLOY_ENV" ; then (
+		bosh_env="$(genesis "$DEPLOY_ENV" lookup genesis 2>/dev/null | jq -r '.bosh_env // .env')"
+		[[ "$bosh_env" =~ / ]] || bosh_env="${bosh_env}/bosh"
+
+		bosh_exodus="$(genesis "$DEPLOY_ENV" lookup --exodus-for "$bosh_env" . "{}" 2>/dev/null)"
+		CREDHUB_SERVER="$(jq -r '.credhub_url // ""' <<<"$bosh_exodus")"
+		if [[ -n "$CREDHUB_SERVER" ]] ; then
+			echo
+			echo "Attempting to remove credhub secrets under /${bosh_env/\//-}/${DEPLOY_ENV}-${KIT_SHORTNAME}/"
+			CREDHUB_CLIENT="$(jq -r '.credhub_username // ""' <<<"$bosh_exodus")"
+			CREDHUB_SECRET="$(jq -r '.credhub_password // ""' <<<"$bosh_exodus")"
+			CREDHUB_CA_CERT="$(jq -r '"\(.credhub_ca_cert)\(.ca_cert)"' <<<"$bosh_exodus")"
+			export CREDHUB_SERVER CREDHUB_CLIENT CREDHUB_SECRET CREDHUB_CA_CERT
+			credhub delete -p "/${bosh_env/\//-}/${DEPLOY_ENV}-${KIT_SHORTNAME}/"
+			echo
+		fi
+	) ; fi
+
+  if [[ -n "$SECRETS_SEED_DATA" ]] ; then
+
+    header "Importing required user-provided seed data for $DEPLOY_ENV"
+    # Replace and sanitize seed data
+    seed=
+    if ! seed="$(echo "$SECRETS_SEED_DATA" | spruce merge --skip-eval | spruce json | jq -M .)" ; then
+      echo >&2 "Secrets seed data is corrupt; expecting valid JSON"
+      exit 1
+    fi
+    if ! bad_keys="$(jq -rM '. | with_entries( select(.key|test("^\\${GENESIS_SECRETS_BASE}/")|not))| keys| .[] | "  - \(.)"' <<<"$seed")" ; then
+      echo >&2 "Failed to validate secrets seed data keys: $bad_keys"
+      exit 1
+    fi
+    if [[ -n "$bad_keys" ]] ; then
+      echo >&2 "Secrets seed data contains bad keys.  All keys must start with "
+      echo >&2 "'\${GENESIS_SECRETS_BASE}/', and the following do not:"
+      echo >&2 "$bad_keys"
+      exit 1
+    fi
+    processed_data=
+    if ! processed_data="$( jq -M --arg p "$vault_path/" '. | with_entries( .key |= sub("^\\${GENESIS_SECRETS_BASE}/"; $p))' <<<"$seed")" ; then
+      echo >&2 "Failed to import secret seed data"
+      exit 1
+    fi
+    if ! safe import <<<"$processed_data" ; then
+      echo >&2 "Failed to import secrets seed data"
+      exit 1
+    fi
+  fi
+else
+	echo "Skipping replacing secrets"
+fi
+
+if [[ "$SKIP_DEPLOY" == "false" ]]; then
+	header "Deploying ${DEPLOY_ENV} environment to verify functionality..."
+	genesis "${DEPLOY_ENV}" "do" -- list
+	genesis "${DEPLOY_ENV}" add-secrets
+
+	# get and upload stemcell version if needed (handled by bosh cli if version and name are supplied)
+	stemcell_iaas=
+	case "${INFRASTRUCTURE:-none}" in
+		aws)         stemcell_iaas="aws-xen-hvm" ;;
+		azure)       stemcell_iaas="azure-hyperv" ;;
+		openstack)   stemcell_iaas="openstack-kvm" ;;
+		warden)      stemcell_iaas="warden-boshlite" ;;
+		google|gcp)  stemcell_iaas="google-kvm" ;;
+		vsphere)     stemcell_iaas="vsphere-esxi" ;;
+		*)           echo >&2 "Unknown or missing INFRASTRUCTURE value -- cannot upload stemcell" ;;
+	esac
+
+	if [[ -n "$stemcell_iaas" ]] ; then
+		stemcell_data="$(genesis "${DEPLOY_ENV}" lookup --merged stemcells)"
+		stemcell_os="$(jq -r '.[0].os' <<<"$stemcell_data")"
+		stemcell_version="$(jq -r '.[0].version' <<<"$stemcell_data")"
+		stemcell_name="bosh-${stemcell_iaas}-${stemcell_os}-go_agent"
+		upload_options=('--version' "${stemcell_version}" '--name' "$stemcell_name")
+		upload_params="?v=${stemcell_version}"
+		if [[ "$stemcell_version" == "latest" ]] ; then
+			stemcell_version='[0-9]\+\.[0-9]\+'
+			upload_options=()
+			upload_params=""
+		fi
+		if ! genesis "${DEPLOY_ENV}" bosh stemcells 2>/dev/null \
+		   | grep "^${stemcell_name}" \
+		   | awk '{print $2}' | sed -e 's/\*//' \
+		   | grep "^${stemcell_version}\$" ; then
+			genesis "${DEPLOY_ENV}" bosh upload-stemcell "https://bosh.io/d/stemcells/$stemcell_name${upload_params}" ${upload_options[@]+"${upload_options[@]}"}
+		fi
+	fi
+
+	genesis "${DEPLOY_ENV}" deploy -y
+
+	if [[ -f .genesis/manifests/${DEPLOY_ENV}-state.yml ]] ; then
+		echo $'\n'"${DEPLOY_ENV} state file:"
+		echo "----------------->8------------------"
+		cat ".genesis/manifests/${DEPLOY_ENV}-state.yml"
+		echo "----------------->8------------------"
+	fi
+
+	genesis "${DEPLOY_ENV}" info
+	if ! is_proto "$DEPLOY_ENV" ; then
+		genesis "${DEPLOY_ENV}" bosh instances --ps
+	fi
+
+fi
+
+if [[ "$SKIP_SMOKE_TESTS" == "false" ]]; then
+  if [[ -f "$0/test-addons" ]] ; then
+    header "Validating addons..."
+    # shellcheck source=/dev/null
+    source "$0/test-addons"
+  fi
+
+  if [[ -f "$0/smoketests" ]] ; then
+    header "Running smoke tests..."
+    # shellcheck source=/dev/null
+    source "$0/smoketests"
+  fi
+else
+	echo "Skipping smoke_tests"
+fi
+
+if [[ "$SKIP_CLEAN" == "false" ]]; then
+	cleanup "${DEPLOY_ENV}"
+else
+	echo "Skipping CLEANUP"
+fi
+
+$$--GLUE--$$
+.\ci\scripts\update-release.sh
+$$--GLUE--$$
+#!/bin/bash
+
+set -e
+set -o pipefail
+export TERM=xterm-256color
+
+header() {
+  echo
+  echo "================================================================================"
+  echo "$1"
+  echo "--------------------------------------------------------------------------------"
+  echo
+}
+
+bail() {
+  echo >&2 "[1;31m[ERROR][0m $*  Did you misconfigure Concourse?"
+  exit 2
+}
+
+test -n "${GIT_EMAIL:-}"      || bail "GIT_EMAIL must be set to an email address to use for Git commits."
+test -n "${GIT_NAME:-}"       || bail "GIT_NAME must be set to something; it will be used for Git commits."
+test -n "${RELEASE_NAME:-}"   || bail "RELEASE_NAME must be set to whatever the release name is."
+test -n "${RELEASE_PATH:-}"   || bail "RELEASE_PATH must be set to the relative position of the release override file."
+test -n "${BRANCH:-}"         || bail "BRANCH must be set to the branch to update."
+
+# Get release details
+pushd bosh-release &> /dev/null
+release_name=$RELEASE_NAME
+release_version="$( cat version )"
+url="$( cat url )"
+if [[ -f sha1 ]] ; then # bosh-io-release
+  sha1=$( cat sha1 )
+else # github-release (maybe others?)
+  filename="$( compgen -G "$release_name"*"$release_version.tar.gz" \
+            || compgen -G "$release_name"*"$release_version.tar" \
+            || compgen -G "$release_name"*"$release_version.tgz" \
+            || compgen -G "$release_name"*"$release_version.zip" )"
+  if [[ "$url" =~ https://github.com.*releases/tag/v?$release_version ]] ; then
+    url="${url/\/tag\//\/download\/}/$filename"
+  fi
+  sha1="$( sha1sum "$filename" | cut -d' ' -f1)"
+fi
+popd &> /dev/null
+
+# Create ops-file
+if ! grep -q "version: \\+${release_version}\$" "git/${RELEASE_PATH}"; then
+
+  cat > "git/${RELEASE_PATH}" <<YML
+releases:
+- name: ${release_name}
+  version: ${release_version}
+  url: ${url}
+  sha1: ${sha1}
+YML
+
+  header "Release file changes:"
+  results="$(git -C git diff -b --color=always "${RELEASE_PATH}" | cat)"
+  if echo "$results" | grep -q '.' ; then
+    echo "$results"
+  else
+    echo "No differences found"
+    exit 0
+  fi
+
+  header "Recreate spec-test results to validate upstream"
+  pushd git/spec &> /dev/null
+  # TODO: remove spec/{credhub,vault} if needed? because this will regenerate vault.
+  rm -rf results/
+  ACK_GINKGO_RC=true ginkgo -p
+  popd &> /dev/null
+
+  header "Spec file changes:"
+  git -C git diff --color=always spec/results/ | cat
+
+  if [[ -n $(git -C git status -s) ]]; then
+
+    header "Commiting updates to git"
+    git config --global user.name  "${GIT_NAME}"
+    git config --global user.email "${GIT_EMAIL}"
+
+    pushd git &>/dev/null
+    git add "${RELEASE_PATH}"
+    git add spec/
+    git commit -m "Release updated: ${release_name}/${release_version}"
+
+    # The following is done to ensure a clean push to the develop branch, while
+    # basing the input on a version that last passed the spec-tests.
+    https_url="$(git remote -v | grep '(fetch)' | sed -e 's/.*github.com:\(.*\) (fetch)/https:\/\/github.com\/\1/')"
+    git remote add live "$https_url"
+    git pull --rebase=merges live "$BRANCH" -X theirs --no-edit
+    git remote remove live
+    popd &> /dev/null
+  else
+    echo "No changes detected."
+  fi
+else
+  echo "Nothing to do as versions are the same"
+fi
+
+$$--GLUE--$$
+.\hooks\addon
+$$--GLUE--$$
+#!/bin/bash
+set -u
+#Version check
+min_version="2.7.0"
+genesis_version="$(genesis -v 2>&1 | grep '^Genesis v' | sed -e 's/Genesis v\(.*\) (.*$/\1/')"
+if ! [[ "$genesis_version" =~ -dev$ ]] && ! new_enough "$genesis_version" "$min_version" ; then
+  describe >&2 "" "#R{[ERROR]} This kit needs Genesis $min_version.  Please upgrade before continuing" ""
+  exit 1
+fi
+set -e
+
+# TODO: This should all be using exodus data, not vault and deployed manifest data
+
+was_deployed() {
+  test -f "${GENESIS_ROOT}/.genesis/manifest/${GENESIS_ENVIRONMENT}.yml"
+}
+
+shield_version() {
+  if ! was_deployed; then
+    bail "" \
+      "#R{[ERROR]} No deployment found.  Please run deploy on this environment before" \
+      "        running any addons"
+  fi
+  lookup --deployed "releases[name=shield].version"
+}
+
+ip() {
+  if ! was_deployed; then
+    bail "" \
+      "#R{[ERROR]} No deployment found.  Please run deploy on this environment before" \
+      "        running any addons"
+  fi
+  lookup --deployed "params.shield_static_ip"
+}
+
+
+list() {
+  describe "$(cat <<EOF
+
+The following addons are defined for the #C{$GENESIS_KIT_ID} kit:
+
+  #G{visit}            Open the SHIELD Web Interface in your browser
+                   (requires macOS)
+
+  #G{runtime-config}   [shortcut: #G{rc}] Print out a BOSH runtime-config for setting
+                   up SHIELD agent as an add-on.
+
+                   If you keep and check in the runtime config file into your
+                   version control repository, you will want to use the
+                   #y{--vaultify} option.  This improves security by keeping
+                   secrets as (( vault )) operations, but requires piping
+                   through spruce before pushing changes to BOSH.
+
+                   To automatically merge these changes to your runtime-config
+                   file, do the following (please note, any order or comment in
+                   this file will not be maintained -- manually add the output
+                   of this command to your rc file if you wish to preserve
+                   these):
+                     #G{$GENESIS_CALL do "$GENESIS_ENVIRONMENT" -- rc --vaultify | \\
+                       spruce merge --skip-eval }#Gi{<rc-file>}#G{ - > }#Gi{<new-rc-file>}
+
+                   To upload changes to BOSH:
+                     #G{$GENESIS_BOSH_COMMAND -e "${BOSH_ALIAS:-${GENESIS_BOSH_ENVIRONMENT:-${BOSH_ENVIRONMENT:-$GENESIS_ENVIRONMENT}}}" urc <(spruce merge }#Gi{<new-rc-file>}#G{)}
+EOF
+)" ""
+}
+
+case $GENESIS_ADDON_SCRIPT in
+list)
+  list
+  exit 0
+  ;;
+
+visit)
+  if ! command -v open >/dev/null 2>&1; then
+    echo "The 'visit' addon script only works on macOS, currently."
+    exit 1
+  fi
+  open "https://$(ip)"
+  ;;
+
+runtime-config|rc)
+
+
+  vaultify=''
+  if [[ ${#@} -gt 1 ]] ; then
+    echo "Too many arguments.  Usage: '$GENESIS_ADDON_SCRIPT [--vaultify]'"
+    exit 1
+  elif [[ ${#@} -eq 1 ]] ; then
+    if [[ $1 == "--vaultify" ]] ; then
+      vaultify=1
+    else
+      echo "Unknown argument $1.  Usage: '$GENESIS_ADDON_SCRIPT [--vaultify]'"
+      exit 1
+    fi
+  fi
+
+  cat <<EOF
+releases:
+  - name:    shield
+    version: $(shield_version)
+
+meta:
+  vault: "${GENESIS_SECRETS_BASE}"
+
+addons:
+  - name: shield-agent
+    jobs:
+      - name:    shield-agent
+        release: shield
+        properties:
+          shield-url: https://$(ip)
+          require-shield-core: false
+
+          core:
+EOF
+if [[ -n "$vaultify" ]] ; then
+  cat <<EOF
+            ca: (( vault meta.vault "certs/ca:certificate" ))
+EOF
+else
+  cat <<EOF
+            ca: |
+EOF
+  safe read "${GENESIS_SECRETS_BASE}certs/ca:certificate" | sed -e 's/^/              /'
+fi
+  cat <<EOF
+
+          agent:
+EOF
+if [[ -n "$vaultify" ]] ; then
+  cat <<EOF
+            key: (( vault meta.vault "agent:public" ))
+EOF
+else
+  cat <<EOF
+
+            key: |
+EOF
+  safe read "${GENESIS_SECRETS_BASE}agent:public" | sed -e 's/^/              /'
+fi
+  cat <<EOF
+
+          env:
+            http_proxy:  "$(lookup params.http_proxy)"
+            https_proxy: "$(lookup params.https_proxy)"
+            no_proxy:    "$(lookup params.no_proxy)"
+
+EOF
+  ;;
+
+*)
+  echo "Unrecognized SHIELD Genesis Kit addon."
+  list
+  exit 1
+  ;;
+esac
+
+$$--GLUE--$$
+.\hooks\blueprint
+$$--GLUE--$$
+#!/bin/bash
+
+set -eu
+
+declare -a merge opsfiles
+opsfiles=()
+ops_var='merge'
+want_feature "ocfp" && ops_var="opsfiles"
+
+for want in ${GENESIS_REQUESTED_FEATURES}
+do
+  case ${want} in
+    (ocfp|oauth|oauth-provider|proxy|postgres-addon|secure|okta)
+      true
+      ;;
+    (*)
+      if [[ -f "$GENESIS_ROOT/ops/$want.yml" ]]
+      then eval "$ops_var+=( \"$GENESIS_ROOT/ops/$want.yml\" )"
+      else echo "ERROR: Unsupported feature: ${want}" ; exit 1
+      fi
+      ;;
+  esac
+done
+
+merge=( 
+  "manifests/shield.yml"
+  "manifests/releases/shield.yml"
+)
+
+want_feature postgres-addon && merge+=( 
+  "manifests/addons/postgres.yml"
+  "manifests/releases/shield-addon-postgres.yml"
+)
+
+want_feature okta   && merge+=( "manifests/addons/okta.yml" )
+want_feature secure && merge+=( "manifests/addons/secure.yml" )
+want_feature oauth  && merge+=( "manifests/oauth.yml" )
+
+if want_feature oauth-provider
+then
+  echo >&2 "The oauth-provider feature flag is now just called 'oauth'."
+  merge+=( "manifests/oauth.yml" )
+fi
+
+if want_feature proxy
+then
+  echo >&2 "You no longer need to explicitly specify the 'proxy' feature."
+  echo >&2 "If you remove it, everything will still work as expected."
+fi
+
+# ocfp feature overide everything except opsfiles.
+want_feature ocfp && merge+=( 
+  "ocfp/meta.yml"
+  "ocfp/ocfp.yml"
+)
+
+echo "${merge[@]}"
+if (( ${#opsfiles[@]} > 0 ))
+then echo "${opsfiles[@]}"
+fi
+
+$$--GLUE--$$
+.\hooks\check
+$$--GLUE--$$
+#!/bin/bash
+
+# Cloud Config checks
+if [[ -n "$GENESIS_CLOUD_CONFIG" ]] ; then
+  if want_feature ocfp ; then
+    _env_scale="$(lookup --merged meta.ocfp.env.scale)"
+    _vm_type="shield-${_env_scale}"
+    _network="${GENESIS_ENVIRONMENT}-shield"
+    _disk_type="shield-${_env_scale}"
+  else # Legacy was hard coded
+    _vm_type="small"
+    _network="shield"
+    _disk_type="shield"
+  fi
+
+  cloud_config_needs vm_type   "$(lookup params.shield_vm_type   ${_vm_type})"
+  cloud_config_needs network   "$(lookup params.shield_network   ${_network})"
+  cloud_config_needs disk_type "$(lookup params.shield_disk_pool ${_disk_type})"
+
+  if check_cloud_config; then
+    describe "  cloud config [#G{OK}]"
+  else
+    describe "  cloud config [#R{FAILED}]"
+    exit 1
+  fi
+fi
+
+$$--GLUE--$$
+.\hooks\info
+$$--GLUE--$$
+#!/bin/bash
+set -eu
+
+# TODO: Fix lookup params.installation below for ocfp
+
+if want_feature ocfp; then
+  core_name=$(lookup meta.core.name)
+else
+  core_name=$(lookup params.installation 'S.H.I.E.L.D.')
+fi
+
+describe \
+  "" \
+  "#B${core_name}" \
+  "" \
+  "endpoint information" \
+  "  #C{$(exodus url)}" \
+  "" \
+  "admin credentials" \
+  "  username: #M{$(exodus admin_username)}" \
+  "  password: #G{$(exodus admin_password)}"
+
+$$--GLUE--$$
+.\hooks\new
+$$--GLUE--$$
+#!/bin/bash
+set -eu
+
+ip= # assigned below with prompt_for
+prompt_for ip line \
+	'What IP address would you like to deploy SHIELD on?'
+
+external_domain= # assugbed below with prompt_for
+prompt_for external_domain line \
+  'What domain name would you like to use? (leave blank to just use IP)' \
+  --default ''
+
+isoauth= # assigned below with prompt_for
+prompt_for isoauth boolean -i --default 'false' \
+	'Would you like to authenticate against an OAuth2 endpoint (Github / UAA)? [y|N]'
+
+secure=
+prompt_for secure boolean -i  --default  'true' \
+  'Would you like to secure the admin user with a generated password and optional username? [Y|n]'
+
+username='admin'
+if $secure ; then
+  prompt_for username line -i --default $username \
+    'Admin username:'
+fi
+
+(
+echo "---"
+echo "kit:"
+echo "  name:    $GENESIS_KIT_NAME"
+echo "  version: $GENESIS_KIT_VERSION"
+if $isoauth || $secure; then
+	echo "  features:"
+  $isoauth && echo "    - oauth"
+  $secure && echo "    - secure"
+else
+	echo "  features: []"
+fi
+echo ""
+genesis_config_block
+
+echo "params:"
+echo "  shield_static_ip: $ip"
+if [[ -n "$external_domain" ]] ; then
+  echo "  external_domain: $external_domain"
+fi
+if [[ "$username" != "admin" ]] ; then
+  echo "  admin_username: $username"
+fi
+) > "$GENESIS_ROOT/$GENESIS_ENVIRONMENT.yml"
+
+$$--GLUE--$$
+.\hooks\post-deploy
+$$--GLUE--$$
+#!/bin/bash
+set -eu
+
+if [[ $GENESIS_DEPLOY_RC == 0 ]]
+then
+  describe \
+    "" \
+    "#M{$GENESIS_ENVIRONMENT} SHIELD Core deployed!" \
+    "" \
+    "For details about the deployment, run" \
+    "" \
+    "  #G{genesis info $GENESIS_ENVIRONMENT}" \
+    "" \
+    "To access the SHIELD Web UI, run" \
+    "" \
+    "  #G{genesis do $GENESIS_ENVIRONMENT -- visit}" \
+    "" \
+    "You may want to configure your $GENESIS_ENVIRONMENT" \
+    "BOSH director with an add-on, via runtime configs" \
+    "To generate a good starting point, run" \
+    "" \
+    "  #G{genesis do $GENESIS_ENVIRONMENT -- runtime-config}" \
+    ""
+fi
+
+exit 0
+
+$$--GLUE--$$
+.\kit.yml
+$$--GLUE--$$
+---
+name: shield
+version: 1.9.0
+
+description:   S.H.I.E.L.D. Data Protection
+author: James Hunt <jhunt@starkandwayne.com>
+docs:   https://shieldproject.io/genesis
+code:   https://github.com/genesis-community/shield-genesis-kit
+
+genesis_version_min: 2.7.6
+
+certificates:
+  base:
+    certs:
+      ca:
+        valid_for: ${params.ca_validity_period}
+      server:
+        valid_for: ${params.cert_validity_period}
+        names:
+          - 127.0.0.1
+          - "${params.shield_static_ip}"
+          - "${params.external_domain}"
+    vault:
+      ca:
+        valid_for: ${params.ca_validity_period}
+      server:
+        valid_for: ${params.cert_validity_period}
+        names:
+          - 127.0.0.1
+
+credentials:
+  base:
+    agent: ssh 2048 fixed
+
+  secure:
+    failsafe:
+      admin_password: random 24
+
+$$--GLUE--$$
+.\manifests\addons\okta.yml
+$$--GLUE--$$
+---
+instance_groups:
+  - name: shield
+    jobs:
+      - name: core
+        properties:
+          core:
+            authentication:
+            - identifier: okta # or whatever you used when registering
+              name:       Okta
+              backend:    okta
+              properties:
+                client_id:            (( vault meta.vault "/okta:client_id" ))
+                client_secret:        (( vault meta.vault "/okta:client_secret" ))
+                # NOTE: domain + auth_server === issuer
+                okta_domain:          (( vault meta.vault "/okta:domain" ))
+                authorization_server: (( vault meta.vault "/okta:auth_server" ))
+                deployment_uri:       (( grab exodus.api_url )) # SHIELD-DEPLOYMENT-URL
+                mapping:  
+                - okta: okta
+                  tenant: Default Tenant
+                  rights:
+                    - { group: Admin, role: admin }
+                    - { group: User , role: engineer }
+                    - { group: Everyone, role: operator }
+                    - { role: operator }
+
+        
+
+$$--GLUE--$$
+.\manifests\addons\postgres.yml
+$$--GLUE--$$
+---
+params:
+  postgres-addon-version: (( param "Please specify the version of the Postgres addon.  Expecting one of 9.0, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 10, 11" ))
+
+instance_groups:
+- name: shield
+  jobs:
+  - name:    (( concat "shield-addon-postgres-" params.postgres-addon-version ))
+    release: shield-addon-postgres
+
+$$--GLUE--$$
+.\manifests\addons\secure.yml
+$$--GLUE--$$
+---
+exodus:
+  admin_username: (( grab params.admin_username || "admin" ))
+  admin_password: (( vault meta.vault "/failsafe:admin_password" ))
+
+instance_groups:
+- name: shield
+  jobs:
+  - name: core
+    properties:
+      failsafe:
+        username: (( grab params.admin_username || "admin" ))
+        password: (( vault meta.vault "/failsafe:admin_password" ))
+
+$$--GLUE--$$
+.\manifests\oauth.yml
+$$--GLUE--$$
+---
+params:
+  authentication: (( param "A SHIELD OAuth specification for configuring auth providers that maps tenants and roles" ))
+
+instance_groups:
+  - name: shield
+    jobs:
+      - name: core
+        properties:
+          core:
+            authentication: (( grab params.authentication ))
+
+$$--GLUE--$$
+.\manifests\releases\shield-addon-postgres.yml
+$$--GLUE--$$
+- type: replace
+  path: /releases?/name=shield-addon-postgres?
+  value:
+    name: shield-addon-postgres
+    version: 1.0.2
+    url:     https://github.com/shieldproject/shield-addon-postgres-boshrelease/releases/download/v1.0.2/shield-addon-postgres-1.0.2.tgz
+    sha1:    45fb8d0c4919c55667cb18ee17e5e333a5eb5789
+$$--GLUE--$$
+.\manifests\releases\shield.yml
+$$--GLUE--$$
+releases:
+- name:    shield
+  version: 9.2.0
+  url:     https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  sha1:   3b59c76585efcf7dd32749b3e96c42544886dd72
+
+
+$$--GLUE--$$
+.\manifests\shield.yml
+$$--GLUE--$$
+---
+params:
+  external_domain: (( grab params.shield_static_ip ))
+  ca_validity_period: 10y
+  cert_validity_period: 1y
+
+exodus:
+  url:          (( concat "https://" params.external_domain ))
+  ca_cert:      (( vault meta.vault "/certs/ca:certificate" ))
+  pubkey:       (( vault meta.vault "/agent:public" ))
+  admin_username: "admin"
+  admin_password: "shield"
+
+instance_groups:
+  - name: shield
+    instances: 1
+    azs: [(( grab params.availability_zone || "z1" ))]
+    persistent_disk_type: (( grab params.shield_disk_type || params.shield_disk_pool || "shield" ))
+    vm_type:              (( grab params.shield_vm_type   || "small"  ))
+    stemcell: bionic
+    networks:
+      - name: (( grab params.shield_network || "shield" ))
+        static_ips:
+          - (( grab params.shield_static_ip ))
+
+    jobs:
+      - name: shield-agent
+        release: shield
+        consumes:
+          shield: {from: shield}
+        properties:
+          core:
+            ca: (( vault meta.vault "/certs/ca:certificate" ))
+          env:
+            http_proxy:  (( grab params.http_proxy  || "" ))
+            https_proxy: (( grab params.https_proxy || "" ))
+            no_proxy:    (( grab params.no_proxy    || "" ))
+
+      - name: core
+        release: shield
+        provides:
+          shield: { shared: true, as: shield }
+        properties:
+          require-shield-core: true
+          domain: (( grab params.shield_static_ip ))
+          agent:
+            key: (( vault meta.vault "/agent:private" ))
+          tls:
+            certificate: (( vault meta.vault "/certs/server:certificate" ))
+            key:         (( vault meta.vault "/certs/server:key" ))
+          vault:
+            tls:
+              ca:          (( vault meta.vault "/vault/ca:certificate" ))
+              certificate: (( vault meta.vault "/vault/server:certificate" ))
+              key:         (( vault meta.vault "/vault/server:key" ))
+          core:
+            env: (( grab params.installation || "S.H.I.E.L.D." ))
+
+update:
+  canaries: 0
+  max_in_flight: 1
+  serial: true
+  canary_watch_time: 1000-300000
+  update_watch_time: 1000-300000
+
+stemcells:
+- alias:   bionic
+  os:      (( grab params.stemcell_os      || "ubuntu-jammy" ))
+  version: (( grab params.stemcell_version || "latest" ))
+
+$$--GLUE--$$
+.\ocfp\meta.yml
+$$--GLUE--$$
+---
+meta:
+  ocfp:
+    env:
+      scale: (( grab params.ocfp_env_scale || "dev" ))
+
+    vault:
+      tf: (( concat genesis.secrets_mount "tf/" genesis.vault_env ))
+
+    certs:
+      trusted:
+        - (( vault genesis.secrets_mount "certs/org:ca" )) # Organization CA, if exists
+        - (( vault genesis.secrets_mount "certs/dbs:ca" )) # External Databases CA
+
+  stemcell:
+    name:    (( grab params.stemcell_name    || "default" ))
+    os:      (( grab params.stemcell_os      || "ubuntu-jammy" ))
+    version: (( grab params.stemcell_version || "latest" ))
+
+  shield:
+    ip:     (( vault meta.ocfp.vault.tf "/bosh/iaas/subnets/ocfp/0/ips/ocf/reserved:shield_ip" ))
+    az:     (( concat genesis.env "-z1" ))
+    domain: (( vault meta.ocfp.vault.tf "/ocf/fqdns:shield" ))
+    ca:     (( vault meta.vault         "/certs/ca:certificate" ))
+
+    admin:
+      username: (( vault meta.ocfp.vault.tf "/shield/admin:username" ))
+      password: (( vault meta.ocfp.vault.tf "/shield/admin:password" ))
+
+
+    url:        (( concat "https://" meta.shield.domain ))
+    disk_type:  (( concat "shield-" meta.ocfp.env.scale ))
+    vm_type:    (( concat "shield-" meta.ocfp.env.scale ))
+    network:    (( concat genesis.env "-shield" ))
+
+    agent:
+      pub:      (( vault meta.vault "/agent:public" ))
+      key:      (( vault meta.vault "/agent:private" ))
+
+    server:
+      cert:     (( vault meta.vault "/certs/server:certificate" ))
+      key:      (( vault meta.vault "/certs/server:key" ))
+
+    vault:
+      ca:       (( vault meta.vault "/vault/ca:certificate" ))
+      cert:     (( vault meta.vault "/vault/server:certificate" ))
+      key:      (( vault meta.vault "/vault/server:key" ))
+
+    core:
+      name: (( concat genesis.env "-shield" ))
+
+
+$$--GLUE--$$
+.\ocfp\ocfp.yml
+$$--GLUE--$$
+---
+params:
+  admin_username:   (( grab meta.shield.admin.username ))
+  external_domain:  (( grab meta.shield.domain ))
+
+  # These two required by `check`:
+  shield_static_ip: (( grab meta.shield.ip ))
+  external_domain: (( grab params.shield_static_ip ))
+
+exodus:
+  ca_cert:        (( grab meta.shield.ca ))
+  pubkey:         (( grab meta.shield.agent.pub ))
+  domain:         (( grab meta.shield.domain )) 
+  agent_ip:       (( grab meta.shield.ip )) 
+  dashboard_url:  (( concat "https://" meta.shield.domain )) 
+  api_url:        (( concat "https://" meta.shield.domain )) 
+  admin_username: (( grab meta.shield.admin.username ))
+  admin_password: (( grab meta.shield.admin.password ))
+
+instance_groups:
+  - name: shield
+    persistent_disk_type: (( concat "shield-" meta.ocfp.env.scale ))
+    instances: 1
+    azs:
+      - (( grab meta.shield.az ))
+
+    persistent_disk_type: (( grab meta.shield.disk_type ))
+    vm_type:              (( grab meta.shield.vm_type ))
+
+    stemcell: default
+
+    networks:
+      - (( replace ))
+      - name: (( grab meta.shield.network ))
+        static_ips:
+          - (( grab meta.shield.ip ))
+
+    vm_extensions:
+      - ((replace))
+      - shield-lb
+
+    jobs:
+      - name: shield-agent
+        release: shield
+        consumes:
+          shield: { from: shield }
+        properties:
+          core:
+            ca: (( grab meta.shield.ca ))
+          env:
+            http_proxy:  (( grab params.http_proxy  || "" ))
+            https_proxy: (( grab params.https_proxy || "" ))
+            no_proxy:    (( grab params.no_proxy    || "" ))
+
+      - name: core
+        release: shield
+        provides:
+          shield: { shared: true, as: shield }
+        properties:
+          require-shield-core: true
+          domain: (( grab meta.shield.ip )) # Q: Could this be meta.shield.domain?
+          agent:
+            key: (( grab meta.shield.agent.key ))
+          tls:
+            certificate: (( grab meta.shield.server.cert ))
+            key:         (( grab meta.shield.server.key )) 
+          vault:
+            tls:
+              ca:          (( grab meta.shield.vault.ca ))
+              certificate: (( grab meta.shield.vault.cert ))
+              key:         (( grab meta.shield.vault.key ))
+          core:
+            env: (( grab meta.shield.core.name ))
+          failsafe:
+            username: (( grab meta.shield.admin.username ))
+            password: (( grab meta.shield.admin.password ))
+
+update:
+  canaries: 0
+  max_in_flight: 1
+  serial: true
+  canary_watch_time: 1000-300000
+  update_watch_time: 1000-300000
+
+stemcells:
+- alias:   (( grab meta.stemcell.name ))
+  os:      (( grab meta.stemcell.os   ))
+  version: (( grab meta.stemcell.version ))
+
+
+$$--GLUE--$$
+.\spec\cloud_configs\aws.yml
+$$--GLUE--$$
+azs:
+- name: z1
+  cloud_properties:
+    availability_zone:
+    - test-z1
+    - test-z2
+    - test-z3
+- name: z2
+  cloud_properties:
+    availability_zone:
+    - test-z1
+    - test-z2
+    - test-z3
+- name: z3
+  cloud_properties:
+    availability_zone:
+    - test-z1
+    - test-z2
+    - test-z3
+
+vm_types:
+- name: default
+  cloud_properties:
+    instance_type: m5.large
+    ephemeral_disk: {size: 25_000}
+- name: small
+  cloud_properties:
+    instance_type: m2.small
+    ephemeral_disk: {size: 25_000}
+- name: shield
+  cloud_properties:
+    instance_type: m4.xlarge
+    ephemeral_disk: {size: 50_000}
+- name: test-vm-type
+  cloud_properties:
+    instance_type: m5.xlarge
+    ephemeral_disk: {size: 100_000}
+
+disk_types:
+- name: default
+  disk_size: 3000
+- name: shield
+  disk_size: 3000
+- name: test-disk-type
+  disk_size: 50_000
+networks:
+- name: shield
+  type: manual
+  subnets:
+  - range: 10.99.0.0/16
+    gateway: 10.99.0.1
+    azs: [z1, z2, z3]
+    dns:
+    - test-dns
+    reserved: [ 10.99.0.1 - 10.99.0.15 ]
+    static: [ 10.99.0.16 - 10.99.0.30 ]
+    cloud_properties:
+      subnet: test-subnet
+- name: test-network
+  type: manual
+  subnets:
+  - range: 10.99.0.0/16
+    gateway: 10.99.0.1
+    azs: [z1, z2, z3]
+    dns:
+    - test-dns
+    reserved: [ 10.99.0.1 - 10.99.0.15 ]
+    static: [ 10.99.0.16 - 10.99.0.30 ]
+    cloud_properties:
+      subnet: test-subnet
+- name: vip
+  type: vip
+
+compilation:
+  workers: 5
+  reuse_compilation_vms: true
+  az: z1
+  vm_type: default
+  network: default
+
+$$--GLUE--$$
+.\spec\deployments\base.yml
+$$--GLUE--$$
+---
+kit:
+  features: []
+
+genesis:
+  env:   base
+
+params:
+  shield_static_ip: 10.99.0.16
+  installation:     S.H.I.E.L.D. CI/CD
+$$--GLUE--$$
+.\spec\deployments\oauth.yml
+$$--GLUE--$$
+---
+kit:
+  features:
+  - oauth
+
+genesis:
+  env:   oauth
+
+params:
+  shield_static_ip: 10.99.0.16
+  installation:     S.H.I.E.L.D. CI/CD
+  authentication: test-auth
+$$--GLUE--$$
+.\spec\deployments\postgres.yml
+$$--GLUE--$$
+---
+kit:
+  features:
+  - postgres-addon
+
+genesis:
+  env:   postgres
+
+params:
+  shield_static_ip: 10.99.0.16
+  installation:     S.H.I.E.L.D. CI/CD
+  postgres-addon-version: 11
+$$--GLUE--$$
+.\spec\deployments\secure.yml
+$$--GLUE--$$
+---
+kit:
+  features:
+  - secure
+
+genesis:
+  env:   secure
+
+params:
+  shield_static_ip: 10.99.0.16
+  installation:     S.H.I.E.L.D. CI/CD
+  admin_username:   superuser
+
+$$--GLUE--$$
+.\spec\go.mod
+$$--GLUE--$$
+module github.com/genesis-community/shield-genesis-kit/spec
+
+// replace github.com/genesis-community/testkit => ../../testkit
+
+go 1.22
+
+require (
+	github.com/genesis-community/testkit/v2 v2.0.2
+	github.com/onsi/ginkgo/v2 v2.17.3
+	github.com/onsi/gomega v1.33.1
+)
+
+require (
+	github.com/BurntSushi/toml v1.3.2 // indirect
+	github.com/blang/semver/v4 v4.0.0 // indirect
+	github.com/egymgmbh/go-prefix-writer v0.0.0-20180609083313-7326ea162eca // indirect
+	github.com/go-logr/logr v1.4.1 // indirect
+	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
+	github.com/gonvenience/bunt v1.3.5 // indirect
+	github.com/gonvenience/neat v1.3.13 // indirect
+	github.com/gonvenience/term v1.0.2 // indirect
+	github.com/gonvenience/text v1.0.7 // indirect
+	github.com/gonvenience/wrap v1.2.0 // indirect
+	github.com/gonvenience/ytbx v1.4.4 // indirect
+	github.com/google/go-cmp v0.6.0 // indirect
+	github.com/google/pprof v0.0.0-20240509144519-723abb6459b7 // indirect
+	github.com/homeport/dyff v1.7.1 // indirect
+	github.com/itchyny/gojq v0.12.15 // indirect
+	github.com/itchyny/timefmt-go v0.1.5 // indirect
+	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
+	github.com/mattn/go-ciede2000 v0.0.0-20170301095244-782e8c62fec3 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mitchellh/go-ps v1.0.0 // indirect
+	github.com/mitchellh/hashstructure v1.1.0 // indirect
+	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
+	github.com/texttheater/golang-levenshtein v1.0.1 // indirect
+	github.com/virtuald/go-ordered-json v0.0.0-20170621173500-b18e6e673d74 // indirect
+	golang.org/x/net v0.25.0 // indirect
+	golang.org/x/sync v0.7.0 // indirect
+	golang.org/x/sys v0.20.0 // indirect
+	golang.org/x/term v0.20.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
+	golang.org/x/tools v0.21.0 // indirect
+	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
+
+$$--GLUE--$$
+.\spec\go.sum
+$$--GLUE--$$
+github.com/BurntSushi/toml v1.3.2 h1:o7IhLm0Msx3BaB+n3Ag7L8EVlByGnpq14C4YWiu/gL8=
+github.com/BurntSushi/toml v1.3.2/go.mod h1:CxXYINrC8qIiEnFrOxCa7Jy5BFHlXnUU2pbicEuybxQ=
+github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
+github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
+github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/egymgmbh/go-prefix-writer v0.0.0-20180609083313-7326ea162eca h1:7oodhZp9MZW0DBkrZXyUsJWKQFy35SVxjZ8K4vHXnk8=
+github.com/egymgmbh/go-prefix-writer v0.0.0-20180609083313-7326ea162eca/go.mod h1:UhMFM+dnOcm1f0Pve8uqRaxAhEYki+/CuA2BTDp2T04=
+github.com/fsnotify/fsnotify v1.6.0 h1:n+5WquG0fcWoWp6xPWfHdbskMCQaFnG6PfBrh1Ky4HY=
+github.com/fsnotify/fsnotify v1.6.0/go.mod h1:sl3t1tCWJFWoRz9R8WJCbQihKKwmorjAbSClcnxKAGw=
+github.com/genesis-community/testkit/v2 v2.0.2 h1:XH5xN+QjjYhmmhY38rW6hSkGpaYLvVZ489WK3KUrrCQ=
+github.com/genesis-community/testkit/v2 v2.0.2/go.mod h1:PMi9F8OWF8eG3oL2/wnJEkt6i+8x37X0cnUDnYbST+8=
+github.com/go-logr/logr v1.4.1 h1:pKouT5E8xu9zeFC39JXRDukb6JFQPXM5p5I91188VAQ=
+github.com/go-logr/logr v1.4.1/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
+github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1vB6EwHI=
+github.com/go-task/slim-sprig/v3 v3.0.0/go.mod h1:W848ghGpv3Qj3dhTPRyJypKRiqCdHZiAzKg9hl15HA8=
+github.com/gonvenience/bunt v1.3.5 h1:wSQquifvwEWtzn27k1ngLfeLaStyt0k1b/K6TrlCNAs=
+github.com/gonvenience/bunt v1.3.5/go.mod h1:7ApqkVBEWvX04oJ28Q2WeI/BvJM6VtukaJAU/q/pTs8=
+github.com/gonvenience/neat v1.3.13 h1:wRp1k0GX5EOpelNH3GyLaFy4SvnJ6k1U5SenmEWkXko=
+github.com/gonvenience/neat v1.3.13/go.mod h1:aE3+z4XlTJ+RzlZxdFiAIIJc1ikYLALAWtX9LqjQ87Q=
+github.com/gonvenience/term v1.0.2 h1:qKa2RydbWIrabGjR/fegJwpW5m+JvUwFL8mLhHzDXn0=
+github.com/gonvenience/term v1.0.2/go.mod h1:wThTR+3MzWtWn7XGVW6qQ65uaVf8GHED98KmwpuEQeo=
+github.com/gonvenience/text v1.0.7 h1:YmIqmgTwxnACYCG59DykgMbomwteYyNhAmEUEJtPl14=
+github.com/gonvenience/text v1.0.7/go.mod h1:OAjH+mohRszffLY6OjgQcUXiSkbrIavooFpfIt1ZwAs=
+github.com/gonvenience/wrap v1.2.0 h1:CwAoa60QIBVmQn/aUregAbk9FstEr17k9vCYpKF972c=
+github.com/gonvenience/wrap v1.2.0/go.mod h1:iNijaTmFD8+ORmNp9iS+dSBcCJrmIwwyoYLUngToGdk=
+github.com/gonvenience/ytbx v1.4.4 h1:jQopwyaLsVGuwdxSiN4WkXjsEaFNPJ3V4lUj7eyEpzo=
+github.com/gonvenience/ytbx v1.4.4/go.mod h1:w37+MKCPcCMY/jpPNmEklD4xKqrOAVBO6kIWW2+uI6M=
+github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
+github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/google/pprof v0.0.0-20240509144519-723abb6459b7 h1:velgFPYr1X9TDwLIfkV7fWqsFlf7TeP11M/7kPd/dVI=
+github.com/google/pprof v0.0.0-20240509144519-723abb6459b7/go.mod h1:kf6iHlnVGwgKolg33glAes7Yg/8iWP8ukqeldJSO7jw=
+github.com/gorilla/mux v1.8.0 h1:i40aqfkR1h2SlN9hojwV5ZA91wcXFOvkdNIeFDP5koI=
+github.com/gorilla/mux v1.8.0/go.mod h1:DVbg23sWSpFRCP0SfiEN6jmj59UnW/n46BH5rLB71So=
+github.com/homeport/dyff v1.7.1 h1:B3KJUtnU53H2UryxGcfYKQPrde8VjjbwlHZbczH3giQ=
+github.com/homeport/dyff v1.7.1/go.mod h1:iLe5b3ymc9xmHZNuJlNVKERE8L2isQMBLxFiTXcwZY0=
+github.com/itchyny/gojq v0.12.15 h1:WC1Nxbx4Ifw5U2oQWACYz32JK8G9qxNtHzrvW4KEcqI=
+github.com/itchyny/gojq v0.12.15/go.mod h1:uWAHCbCIla1jiNxmeT5/B5mOjSdfkCq6p8vxWg+BM10=
+github.com/itchyny/timefmt-go v0.1.5 h1:G0INE2la8S6ru/ZI5JecgyzbbJNs5lG1RcBqa7Jm6GE=
+github.com/itchyny/timefmt-go v0.1.5/go.mod h1:nEP7L+2YmAbT2kZ2HfSs1d8Xtw9LY8D2stDBckWakZ8=
+github.com/kr/pretty v0.1.0 h1:L/CwN0zerZDmRFUapSPitk6f+Q3+0za1rQkzVuMiMFI=
+github.com/kr/pretty v0.1.0/go.mod h1:dAy3ld7l9f0ibDNOQOHHMYYIIbhfbHSm3C4ZsoJORNo=
+github.com/kr/pty v1.1.1/go.mod h1:pFQYn66WHrOpPYNljwOMqo10TkYh1fy3cYio2l3bCsQ=
+github.com/kr/text v0.1.0 h1:45sCR5RtlFHMR4UwH9sdQ5TC8v0qDQCHnXt+kaKSTVE=
+github.com/kr/text v0.1.0/go.mod h1:4Jbv+DJW3UT/LiOwJeYQe1efqtUx/iVham/4vfdArNI=
+github.com/lucasb-eyer/go-colorful v1.2.0 h1:1nnpGOrhyZZuNyfu1QjKiUICQ74+3FNCN69Aj6K7nkY=
+github.com/lucasb-eyer/go-colorful v1.2.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
+github.com/mattn/go-ciede2000 v0.0.0-20170301095244-782e8c62fec3 h1:BXxTozrOU8zgC5dkpn3J6NTRdoP+hjok/e+ACr4Hibk=
+github.com/mattn/go-ciede2000 v0.0.0-20170301095244-782e8c62fec3/go.mod h1:x1uk6vxTiVuNt6S5R2UYgdhpj3oKojXvOXauHZ7dEnI=
+github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
+github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
+github.com/mitchellh/go-ps v1.0.0 h1:i6ampVEEF4wQFF+bkYfwYgY+F/uYJDktmvLPf7qIgjc=
+github.com/mitchellh/go-ps v1.0.0/go.mod h1:J4lOc8z8yJs6vUwklHw2XEIiT4z4C40KtWVN3nvg8Pg=
+github.com/mitchellh/hashstructure v1.1.0 h1:P6P1hdjqAAknpY/M1CGipelZgp+4y9ja9kmUZPXP+H0=
+github.com/mitchellh/hashstructure v1.1.0/go.mod h1:xUDAozZz0Wmdiufv0uyhnHkUTN6/6d8ulp4AwfLKrmA=
+github.com/nxadm/tail v1.4.8 h1:nPr65rt6Y5JFSKQO7qToXr7pePgD6Gwiw05lkbyAQTE=
+github.com/nxadm/tail v1.4.8/go.mod h1:+ncqLTQzXmGhMZNUePPaPqPvBxHAIsmXswZKocGu+AU=
+github.com/onsi/ginkgo v1.16.5 h1:8xi0RTUf59SOSfEtZMvwTvXYMzG4gV23XVHOZiXNtnE=
+github.com/onsi/ginkgo v1.16.5/go.mod h1:+E8gABHa3K6zRBolWtd+ROzc/U5bkGt0FwiG042wbpU=
+github.com/onsi/ginkgo/v2 v2.17.3 h1:oJcvKpIb7/8uLpDDtnQuf18xVnwKp8DTD7DQ6gTd/MU=
+github.com/onsi/ginkgo/v2 v2.17.3/go.mod h1:nP2DPOQoNsQmsVyv5rDA8JkXQoCs6goXIvr/PRJ1eCc=
+github.com/onsi/gomega v1.33.1 h1:dsYjIxxSR755MDmKVsaFQTE22ChNBcuuTWgkUDSubOk=
+github.com/onsi/gomega v1.33.1/go.mod h1:U4R44UsT+9eLIaYRB2a5qajjtQYn0hauxvRm16AVYg0=
+github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
+github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 h1:n661drycOFuPLCN3Uc8sB6B/s6Z4t2xvBgU1htSHuq8=
+github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3/go.mod h1:A0bzQcvG0E7Rwjx0REVgAGH58e96+X0MeOfepqsbeW4=
+github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
+github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=
+github.com/stretchr/testify v1.8.4 h1:CcVxjf3Q8PM0mHUKJCdn+eZZtm5yQwehR5yeSVQQcUk=
+github.com/stretchr/testify v1.8.4/go.mod h1:sz/lmYIOXD/1dqDmKjjqLyZ2RngseejIcXlSw2iwfAo=
+github.com/texttheater/golang-levenshtein v1.0.1 h1:+cRNoVrfiwufQPhoMzB6N0Yf/Mqajr6t1lOv8GyGE2U=
+github.com/texttheater/golang-levenshtein v1.0.1/go.mod h1:PYAKrbF5sAiq9wd+H82hs7gNaen0CplQ9uvm6+enD/8=
+github.com/virtuald/go-ordered-json v0.0.0-20170621173500-b18e6e673d74 h1:JwtAtbp7r/7QSyGz8mKUbYJBg2+6Cd7OjM8o/GNOcVo=
+github.com/virtuald/go-ordered-json v0.0.0-20170621173500-b18e6e673d74/go.mod h1:RmMWU37GKR2s6pgrIEB4ixgpVCt/cf7dnJv3fuH1J1c=
+golang.org/x/net v0.25.0 h1:d/OCCoBEUq33pjydKrGQhw7IlUPI2Oylr+8qLx49kac=
+golang.org/x/net v0.25.0/go.mod h1:JkAGAh7GEvH74S6FOH42FLoXpXbE/aqXSrIQjXgsiwM=
+golang.org/x/sync v0.7.0 h1:YsImfSBoP9QPYL0xyKJPq0gcaJdG3rInoqxTWbfQu9M=
+golang.org/x/sync v0.7.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
+golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+golang.org/x/sys v0.20.0 h1:Od9JTbYCk261bKm4M/mw7AklTlFYIa0bIp9BgSm1S8Y=
+golang.org/x/sys v0.20.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+golang.org/x/term v0.20.0 h1:VnkxpohqXaOBYJtBmEppKUG6mXpi+4O6purfc2+sMhw=
+golang.org/x/term v0.20.0/go.mod h1:8UkIAJTvZgivsXaD6/pH6U9ecQzZ45awqEOzuCvwpFY=
+golang.org/x/text v0.15.0 h1:h1V/4gjBv8v9cjcR6+AR5+/cIYK5N/WAgiv4xlsEtAk=
+golang.org/x/text v0.15.0/go.mod h1:18ZOQIKpY8NJVqYksKHtTdi31H5itFRjB5/qKTNYzSU=
+golang.org/x/tools v0.21.0 h1:qc0xYgIbsSDt9EyWz05J5wfa7LOVW0YTLOXrqdLAWIw=
+golang.org/x/tools v0.21.0/go.mod h1:aiJjzUbINMkxbQROHiO6hDPo2LHcIPhhQsa9DLh0yGk=
+google.golang.org/protobuf v1.33.0 h1:uNO2rsAINq/JlFpSdYEKIZ0uKD/R9cpdv0T+yoGwGmI=
+google.golang.org/protobuf v1.33.0/go.mod h1:c6P6GXX6sHbq/GpV6MGZEdwhWPcYBgnhAHhKbcUYpos=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 h1:YR8cESwS4TdDjEe65xsg0ogRM/Nc3DYOhEAlW+xobZo=
+gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 h1:uRGJdciOHaEIrze2W8Q3AKkepLTh2hOroT7a+7czfdQ=
+gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7/go.mod h1:dt/ZhP58zS4L8KSrWDmTeBkI65Dw0HsyUHuEVlX15mw=
+gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
+gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+
+$$--GLUE--$$
+.\spec\results\base.yml
+$$--GLUE--$$
+exodus:
+  admin_password: shield
+  admin_username: admin
+  bosh: base
+  ca_cert: <!{meta.vault}/certs/ca:certificate!>
+  features: ""
+  is_director: false
+  pubkey: <!{meta.vault}/agent:public!>
+  url: https://10.99.0.16
+  use_create_env: false
+instance_groups:
+- azs:
+  - z1
+  instances: 1
+  jobs:
+  - consumes:
+      shield:
+        from: shield
+    name: shield-agent
+    properties:
+      core:
+        ca: <!{meta.vault}/certs/ca:certificate!>
+      env:
+        http_proxy: ""
+        https_proxy: ""
+        no_proxy: ""
+    release: shield
+  - name: core
+    properties:
+      agent:
+        key: <!{meta.vault}/agent:private!>
+      core:
+        env: S.H.I.E.L.D. CI/CD
+      domain: 10.99.0.16
+      require-shield-core: true
+      tls:
+        certificate: <!{meta.vault}/certs/server:certificate!>
+        key: <!{meta.vault}/certs/server:key!>
+      vault:
+        tls:
+          ca: <!{meta.vault}/vault/ca:certificate!>
+          certificate: <!{meta.vault}/vault/server:certificate!>
+          key: <!{meta.vault}/vault/server:key!>
+    provides:
+      shield:
+        as: shield
+        shared: true
+    release: shield
+  name: shield
+  networks:
+  - name: shield
+    static_ips:
+    - 10.99.0.16
+  persistent_disk_type: shield
+  stemcell: bionic
+  vm_type: small
+name: base-shield
+releases:
+- name: shield
+  sha1: 3b59c76585efcf7dd32749b3e96c42544886dd72
+  url: https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  version: 9.2.0
+stemcells:
+- alias: bionic
+  os: ubuntu-jammy
+  version: latest
+update:
+  canaries: 0
+  canary_watch_time: 1000-300000
+  max_in_flight: 1
+  serial: true
+  update_watch_time: 1000-300000
+
+$$--GLUE--$$
+.\spec\results\oauth.yml
+$$--GLUE--$$
+exodus:
+  admin_password: shield
+  admin_username: admin
+  bosh: oauth
+  ca_cert: <!{meta.vault}/certs/ca:certificate!>
+  features: oauth
+  is_director: false
+  pubkey: <!{meta.vault}/agent:public!>
+  url: https://10.99.0.16
+  use_create_env: false
+instance_groups:
+- azs:
+  - z1
+  instances: 1
+  jobs:
+  - consumes:
+      shield:
+        from: shield
+    name: shield-agent
+    properties:
+      core:
+        ca: <!{meta.vault}/certs/ca:certificate!>
+      env:
+        http_proxy: ""
+        https_proxy: ""
+        no_proxy: ""
+    release: shield
+  - name: core
+    properties:
+      agent:
+        key: <!{meta.vault}/agent:private!>
+      core:
+        authentication: test-auth
+        env: S.H.I.E.L.D. CI/CD
+      domain: 10.99.0.16
+      require-shield-core: true
+      tls:
+        certificate: <!{meta.vault}/certs/server:certificate!>
+        key: <!{meta.vault}/certs/server:key!>
+      vault:
+        tls:
+          ca: <!{meta.vault}/vault/ca:certificate!>
+          certificate: <!{meta.vault}/vault/server:certificate!>
+          key: <!{meta.vault}/vault/server:key!>
+    provides:
+      shield:
+        as: shield
+        shared: true
+    release: shield
+  name: shield
+  networks:
+  - name: shield
+    static_ips:
+    - 10.99.0.16
+  persistent_disk_type: shield
+  stemcell: bionic
+  vm_type: small
+name: oauth-shield
+releases:
+- name: shield
+  sha1: 3b59c76585efcf7dd32749b3e96c42544886dd72
+  url: https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  version: 9.2.0
+stemcells:
+- alias: bionic
+  os: ubuntu-jammy
+  version: latest
+update:
+  canaries: 0
+  canary_watch_time: 1000-300000
+  max_in_flight: 1
+  serial: true
+  update_watch_time: 1000-300000
+
+$$--GLUE--$$
+.\spec\results\postgres.yml
+$$--GLUE--$$
+exodus:
+  admin_password: shield
+  admin_username: admin
+  bosh: postgres
+  ca_cert: <!{meta.vault}/certs/ca:certificate!>
+  features: postgres-addon
+  is_director: false
+  pubkey: <!{meta.vault}/agent:public!>
+  url: https://10.99.0.16
+  use_create_env: false
+instance_groups:
+- azs:
+  - z1
+  instances: 1
+  jobs:
+  - consumes:
+      shield:
+        from: shield
+    name: shield-agent
+    properties:
+      core:
+        ca: <!{meta.vault}/certs/ca:certificate!>
+      env:
+        http_proxy: ""
+        https_proxy: ""
+        no_proxy: ""
+    release: shield
+  - name: core
+    properties:
+      agent:
+        key: <!{meta.vault}/agent:private!>
+      core:
+        env: S.H.I.E.L.D. CI/CD
+      domain: 10.99.0.16
+      require-shield-core: true
+      tls:
+        certificate: <!{meta.vault}/certs/server:certificate!>
+        key: <!{meta.vault}/certs/server:key!>
+      vault:
+        tls:
+          ca: <!{meta.vault}/vault/ca:certificate!>
+          certificate: <!{meta.vault}/vault/server:certificate!>
+          key: <!{meta.vault}/vault/server:key!>
+    provides:
+      shield:
+        as: shield
+        shared: true
+    release: shield
+  - name: shield-addon-postgres-11
+    release: shield-addon-postgres
+  name: shield
+  networks:
+  - name: shield
+    static_ips:
+    - 10.99.0.16
+  persistent_disk_type: shield
+  stemcell: bionic
+  vm_type: small
+name: postgres-shield
+releases:
+- name: shield
+  sha1: 3b59c76585efcf7dd32749b3e96c42544886dd72
+  url: https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  version: 9.2.0
+- name: shield-addon-postgres
+  sha1: 45fb8d0c4919c55667cb18ee17e5e333a5eb5789
+  url: https://github.com/shieldproject/shield-addon-postgres-boshrelease/releases/download/v1.0.2/shield-addon-postgres-1.0.2.tgz
+  version: 1.0.2
+stemcells:
+- alias: bionic
+  os: ubuntu-jammy
+  version: latest
+update:
+  canaries: 0
+  canary_watch_time: 1000-300000
+  max_in_flight: 1
+  serial: true
+  update_watch_time: 1000-300000
+
+$$--GLUE--$$
+.\spec\results\secure.yml
+$$--GLUE--$$
+exodus:
+  admin_password: <!{meta.vault}/failsafe:admin_password!>
+  admin_username: superuser
+  bosh: secure
+  ca_cert: <!{meta.vault}/certs/ca:certificate!>
+  features: secure
+  is_director: false
+  pubkey: <!{meta.vault}/agent:public!>
+  url: https://10.99.0.16
+  use_create_env: false
+instance_groups:
+- azs:
+  - z1
+  instances: 1
+  jobs:
+  - consumes:
+      shield:
+        from: shield
+    name: shield-agent
+    properties:
+      core:
+        ca: <!{meta.vault}/certs/ca:certificate!>
+      env:
+        http_proxy: ""
+        https_proxy: ""
+        no_proxy: ""
+    release: shield
+  - name: core
+    properties:
+      agent:
+        key: <!{meta.vault}/agent:private!>
+      core:
+        env: S.H.I.E.L.D. CI/CD
+      domain: 10.99.0.16
+      failsafe:
+        password: <!{meta.vault}/failsafe:admin_password!>
+        username: superuser
+      require-shield-core: true
+      tls:
+        certificate: <!{meta.vault}/certs/server:certificate!>
+        key: <!{meta.vault}/certs/server:key!>
+      vault:
+        tls:
+          ca: <!{meta.vault}/vault/ca:certificate!>
+          certificate: <!{meta.vault}/vault/server:certificate!>
+          key: <!{meta.vault}/vault/server:key!>
+    provides:
+      shield:
+        as: shield
+        shared: true
+    release: shield
+  name: shield
+  networks:
+  - name: shield
+    static_ips:
+    - 10.99.0.16
+  persistent_disk_type: shield
+  stemcell: bionic
+  vm_type: small
+name: secure-shield
+releases:
+- name: shield
+  sha1: 3b59c76585efcf7dd32749b3e96c42544886dd72
+  url: https://github.com/shieldproject/shield-boshrelease/releases/download/v9.2.0/shield-boshrelease-9.2.0.tgz
+  version: 9.2.0
+stemcells:
+- alias: bionic
+  os: ubuntu-jammy
+  version: latest
+update:
+  canaries: 0
+  canary_watch_time: 1000-300000
+  max_in_flight: 1
+  serial: true
+  update_watch_time: 1000-300000
+
+$$--GLUE--$$
+.\spec\spec_suite_test.go
+$$--GLUE--$$
+package spec_test
+
+import (
+	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+func TestSpec(t *testing.T) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "Shield Genesis Kit Spec Suite")
+}
+
+$$--GLUE--$$
+.\spec\spec_test.go
+$$--GLUE--$$
+package spec_test
+
+import (
+	"path/filepath"
+	"runtime"
+
+	. "github.com/genesis-community/testkit/v2/testing"
+	. "github.com/onsi/ginkgo/v2"
+)
+
+var _ = BeforeSuite(func() {
+	_, filename, _, _ := runtime.Caller(0)
+	KitDir, _ = filepath.Abs(filepath.Join(filepath.Dir(filename), "../"))
+})
+
+var _ = Describe("Shield Kit", func() {
+
+	Describe("shield", func() {
+		Test(Environment{
+			Name:        "base",
+			CloudConfig: "aws",
+			CPI:         "aws",
+		})
+		Test(Environment{
+			Name:        "oauth",
+			CloudConfig: "aws",
+			CPI:         "aws",
+		})
+		Test(Environment{
+			Name:        "postgres",
+			CloudConfig: "aws",
+			CPI:         "aws",
+		})
+		Test(Environment{
+			Name:        "secure",
+			CloudConfig: "aws",
+			CPI:         "aws",
+		})
+	})
+})
+
+$$--GLUE--$$
+.\spec\vault\base.yml
+$$--GLUE--$$
+secret/base/shield/agent:
+  fingerprint: <!{meta.vault}/agent:fingerprint!>
+  private: <!{meta.vault}/agent:private!>
+  public: <!{meta.vault}/agent:public!>
+secret/base/shield/certs/ca:
+  certificate: <!{meta.vault}/certs/ca:certificate!>
+  combined: <!{meta.vault}/certs/ca:combined!>
+  crl: <!{meta.vault}/certs/ca:crl!>
+  key: <!{meta.vault}/certs/ca:key!>
+  serial: <!{meta.vault}/certs/ca:serial!>
+secret/base/shield/certs/server:
+  certificate: <!{meta.vault}/certs/server:certificate!>
+  combined: <!{meta.vault}/certs/server:combined!>
+  key: <!{meta.vault}/certs/server:key!>
+secret/base/shield/vault/ca:
+  certificate: <!{meta.vault}/vault/ca:certificate!>
+  combined: <!{meta.vault}/vault/ca:combined!>
+  crl: <!{meta.vault}/vault/ca:crl!>
+  key: <!{meta.vault}/vault/ca:key!>
+  serial: <!{meta.vault}/vault/ca:serial!>
+secret/base/shield/vault/server:
+  certificate: <!{meta.vault}/vault/server:certificate!>
+  combined: <!{meta.vault}/vault/server:combined!>
+  key: <!{meta.vault}/vault/server:key!>
+
+$$--GLUE--$$
+.\spec\vault\oauth.yml
+$$--GLUE--$$
+secret/oauth/shield/agent:
+  fingerprint: <!{meta.vault}/agent:fingerprint!>
+  private: <!{meta.vault}/agent:private!>
+  public: <!{meta.vault}/agent:public!>
+secret/oauth/shield/certs/ca:
+  certificate: <!{meta.vault}/certs/ca:certificate!>
+  combined: <!{meta.vault}/certs/ca:combined!>
+  crl: <!{meta.vault}/certs/ca:crl!>
+  key: <!{meta.vault}/certs/ca:key!>
+  serial: <!{meta.vault}/certs/ca:serial!>
+secret/oauth/shield/certs/server:
+  certificate: <!{meta.vault}/certs/server:certificate!>
+  combined: <!{meta.vault}/certs/server:combined!>
+  key: <!{meta.vault}/certs/server:key!>
+secret/oauth/shield/vault/ca:
+  certificate: <!{meta.vault}/vault/ca:certificate!>
+  combined: <!{meta.vault}/vault/ca:combined!>
+  crl: <!{meta.vault}/vault/ca:crl!>
+  key: <!{meta.vault}/vault/ca:key!>
+  serial: <!{meta.vault}/vault/ca:serial!>
+secret/oauth/shield/vault/server:
+  certificate: <!{meta.vault}/vault/server:certificate!>
+  combined: <!{meta.vault}/vault/server:combined!>
+  key: <!{meta.vault}/vault/server:key!>
+
+$$--GLUE--$$
+.\spec\vault\postgres.yml
+$$--GLUE--$$
+secret/postgres/shield/agent:
+  fingerprint: <!{meta.vault}/agent:fingerprint!>
+  private: <!{meta.vault}/agent:private!>
+  public: <!{meta.vault}/agent:public!>
+secret/postgres/shield/certs/ca:
+  certificate: <!{meta.vault}/certs/ca:certificate!>
+  combined: <!{meta.vault}/certs/ca:combined!>
+  crl: <!{meta.vault}/certs/ca:crl!>
+  key: <!{meta.vault}/certs/ca:key!>
+  serial: <!{meta.vault}/certs/ca:serial!>
+secret/postgres/shield/certs/server:
+  certificate: <!{meta.vault}/certs/server:certificate!>
+  combined: <!{meta.vault}/certs/server:combined!>
+  key: <!{meta.vault}/certs/server:key!>
+secret/postgres/shield/vault/ca:
+  certificate: <!{meta.vault}/vault/ca:certificate!>
+  combined: <!{meta.vault}/vault/ca:combined!>
+  crl: <!{meta.vault}/vault/ca:crl!>
+  key: <!{meta.vault}/vault/ca:key!>
+  serial: <!{meta.vault}/vault/ca:serial!>
+secret/postgres/shield/vault/server:
+  certificate: <!{meta.vault}/vault/server:certificate!>
+  combined: <!{meta.vault}/vault/server:combined!>
+  key: <!{meta.vault}/vault/server:key!>
+
+$$--GLUE--$$
+.\spec\vault\secure.yml
+$$--GLUE--$$
+secret/secure/shield/agent:
+  fingerprint: <!{meta.vault}/agent:fingerprint!>
+  private: <!{meta.vault}/agent:private!>
+  public: <!{meta.vault}/agent:public!>
+secret/secure/shield/certs/ca:
+  certificate: <!{meta.vault}/certs/ca:certificate!>
+  combined: <!{meta.vault}/certs/ca:combined!>
+  crl: <!{meta.vault}/certs/ca:crl!>
+  key: <!{meta.vault}/certs/ca:key!>
+  serial: <!{meta.vault}/certs/ca:serial!>
+secret/secure/shield/certs/server:
+  certificate: <!{meta.vault}/certs/server:certificate!>
+  combined: <!{meta.vault}/certs/server:combined!>
+  key: <!{meta.vault}/certs/server:key!>
+secret/secure/shield/failsafe:
+  admin_password: <!{meta.vault}/failsafe:admin_password!>
+secret/secure/shield/vault/ca:
+  certificate: <!{meta.vault}/vault/ca:certificate!>
+  combined: <!{meta.vault}/vault/ca:combined!>
+  crl: <!{meta.vault}/vault/ca:crl!>
+  key: <!{meta.vault}/vault/ca:key!>
+  serial: <!{meta.vault}/vault/ca:serial!>
+secret/secure/shield/vault/server:
+  certificate: <!{meta.vault}/vault/server:certificate!>
+  combined: <!{meta.vault}/vault/server:combined!>
+  key: <!{meta.vault}/vault/server:key!>
