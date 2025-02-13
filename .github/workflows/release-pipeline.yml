@@ -99,12 +99,12 @@ jobs:
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
           VERSION="${{ steps.version.outputs.new_version }}"
-          genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
+          genesis compile-kit --force -v "${KIT_VERSION}" -n "${KIT_NAME}"
           
       - uses: actions/upload-artifact@v4
         with:
           name: kit-build
-          path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
+          path: ${{ KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
 
   spec-tests:
     needs: [load-env, build-kit]
