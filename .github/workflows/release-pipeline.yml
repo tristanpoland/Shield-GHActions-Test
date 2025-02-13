@@ -162,10 +162,10 @@ jobs:
           name: spec-diffs
           path: ${{ env.SPEC_CHECK_DIR }}/*
 
-  deploy:
+deploy:
     needs: [spec-tests, spec-check]
-    runs-on: ubuntu-latest
-    environment: ${{ env.TEST_ENV }}
+    runs-on: ${{ vars.RUNNER_OS }}
+    environment: ${{ vars.TEST_ENVIRONMENT }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
