@@ -1,11 +1,5 @@
-# This workflow handles the complete release pipeline for the Shield kit
-# It includes building, testing, and deploying the kit, along with creating releases
 name: Release Pipeline
 
-# Trigger the workflow on:
-# - Push to develop or main branches (except ci/ directory changes)
-# - Pull requests to develop branch (except ci/ directory changes)
-# - Manual trigger with version bump option
 on:
   push:
     branches: [develop, main]
@@ -20,23 +14,20 @@ on:
         required: false
         type: choice
         options:
-          - patch  # For backwards-compatible bug fixes
-          - minor  # For new features, backwards-compatible
-          - major  # For breaking changes
-        default: 'patch'
+          - patch
+          - minor
+          - major
+        default: ${{ vars.build.default_version_bump }}
 
-# Environment variables used across jobs
 env:
-  KIT_NAME: shield # From meta.kit in settings.yml
+  KIT_NAME: ${{ vars.kit.name }}
 
-# Required permissions for the workflow
 permissions:
-  contents: write      # Needed for creating releases and tags
-  pull-requests: write # Needed for creating PRs
-  issues: write        # Needed for creating issues
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
-  # Job: Build the Genesis kit
   build-kit:
     runs-on: ubuntu-latest
     outputs:
@@ -44,12 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Need full history for tags
+          fetch-depth: ${{ vars.build.fetch_depth }}
           
       - id: version
         uses: ./.github/actions/version-manager
         with:
-          bump_type: ${{ inputs.version_bump || 'patch' }}
+          bump_type: ${{ inputs.version_bump || vars.build.default_version_bump }}
           
       - name: Push version change
         run: |
@@ -59,7 +50,6 @@ jobs:
           
       - name: Build Kit
         env:
-          # Secrets needed for Genesis and BOSH operations
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
@@ -70,17 +60,14 @@ jobs:
         run: |
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
-          
-          # Compile the kit
           VERSION="${{ steps.version.outputs.new_version }}"
-          genesis compile-kit --force -v "$VERSION" -n "${{ env.KIT_NAME }}"
+          genesis compile-kit --force -v "$VERSION" -n "${{ vars.kit.name }}"
           
       - uses: actions/upload-artifact@v4
         with:
           name: kit-build
-          path: ${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz
+          path: ${{ vars.kit.name }}-${{ steps.version.outputs.new_version }}.tar.gz
 
-  # Job: Run specification tests
   spec-tests:
     needs: [build-kit]
     runs-on: ubuntu-latest
@@ -99,23 +86,20 @@ jobs:
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
 
-          # Set up Go environment
-          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go${{ vars.tools.go.version }}.${{ vars.tools.go.platform }}.tar.gz
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
           export PATH=$PATH:~/go/bin
           
-          # Run tests
-          cd spec
-          ginkgo -p .
+          cd ${{ vars.test.spec.directory }}
+          ${{ vars.test.spec.runner }} ${{ vars.test.spec.parallel == true && '-p' || '' }} .
 
-  # Job: Check for specification changes
   spec-check:
     needs: [build-kit]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Need full history for tags
+          fetch-depth: ${{ vars.build.fetch_depth }}
           
       - name: Get latest release tag
         id: latest_tag
@@ -136,80 +120,44 @@ jobs:
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
 
-
-          # Set up Go environment
-          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
+          sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go${{ vars.tools.go.version }}.${{ vars.tools.go.platform }}.tar.gz
           go install github.com/onsi/ginkgo/v2/ginkgo@latest
           export PATH=$PATH:~/go/bin
 
-          # Create output directory
-          mkdir -p spec-check
+          mkdir -p ${{ vars.test.spec.results_dir }}
           
-          # Get the previous release for comparison
           if [[ -n "$PREVIOUS_TAG" ]]; then
             git checkout $PREVIOUS_TAG
-            # Store the old specs
-            cp -r spec/results ./spec-check/old-specs
+            cp -r ${{ vars.test.spec.directory }}/results ./${{ vars.test.spec.results_dir }}/old-specs
             git checkout -
           fi
           
-          # Run spec tests to generate new specs
-          cd spec
-          ginkgo -p .
+          cd ${{ vars.test.spec.directory }}
+          ${{ vars.test.spec.runner }} ${{ vars.test.spec.parallel == true && '-p' || '' }} .
           cd ..
           
-          # Generate the spec comparison
-          results_file="${GITHUB_WORKSPACE}/spec-check/diff-$(date -u +%Y%m%d%H%M%S)"
+          results_file="${GITHUB_WORKSPACE}/${{ vars.test.spec.results_dir }}/${{ vars.test.spec.diff_prefix }}$(date -u +%Y%m%d%H%M%S)"
 
           echo "Results of spec comparison" > "$results_file"
-
-          cat $results_file
           
           if [[ -n "$PREVIOUS_TAG" ]]; then
             echo "Comparing specs with previous release $PREVIOUS_TAG..."
-            pwd
             bash -x ./ci/scripts/compare-release-specs.sh "$PREVIOUS_TAG" > "$results_file"
             
-            # Check if there are significant changes
             if ! grep -q "No Spec Changes to Consider" "$results_file"; then
               echo "::warning ::Detected spec changes that may impact users"
             fi
           else
-            echo "No previous release found - this appears to be the first release"
             echo "Initial release - no spec changes to compare" > "$results_file"
           fi
-          
-      - name: Convert Spec Diffs to HTML
-        if: success()
-        run: |
-          # Install aha for ANSI to HTML conversion
-          sudo apt-get update && sudo apt-get install -y aha
-          
-          # Convert all diff files to HTML
-          for diff in spec-check/diff-*; do
-            if [ -f "$diff" ]; then
-              cat "$diff" | aha > "${diff}.html"
-            fi
-          done
-
-      - name: Check for Breaking Changes
-        if: success()
-        run: |
-          for diff in spec-check/diff-*; do
-            if [ -f "$diff" ] && ! grep -q "No Spec Changes to Consider" "$diff"; then
-              echo "::notice ::Spec changes detected - please review the changes"
-              exit 0
-            fi
-          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: spec-diffs
           path: |
-            spec-check/diff-*
-            spec-check/*.html
+            ${{ vars.test.spec.results_dir }}/${{ vars.test.spec.diff_prefix }}*
+            ${{ vars.test.spec.results_dir }}/*.html
 
-  # Job: Deploy and test the kit
   deploy:
     needs: [spec-tests, spec-check]
     runs-on: ubuntu-latest
@@ -223,7 +171,7 @@ jobs:
       - name: Set up Infrastructure
         uses: ./.github/actions/setup-infra
         with:
-          iaas: vsphere
+          iaas: ${{ vars.infra.default_iaas }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           gcp_service_account_key: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
@@ -232,9 +180,9 @@ jobs:
           
       - name: Deploy and Test
         env:
-          DEPLOY_ENV: ci-vsphere-baseline
-          CI_ROOT: ${{ github.workspace }}/ci
-          GITHUB_WORKSPACE: ${{ github.workspace }}
+          DEPLOY_ENV: ${{ vars.environments.ci-testing.deploy_env }}
+          CI_ROOT: ${{ vars.environments.ci-testing.ci_root }}
+          GITHUB_WORKSPACE: ${{ vars.environments.ci-testing.github_workspace }}
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
@@ -248,7 +196,6 @@ jobs:
           ./ci/scripts/ensure-tools.sh
           ./ci/scripts/test-deployment.sh
 
-  # Job: Prepare release (only on develop branch)
   prepare-release:
     if: github.ref == 'refs/heads/develop' && github.event_name != 'pull_request'
     needs: [deploy, build-kit]
@@ -264,24 +211,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./ci/scripts/generate-release-notes.sh \
-            "${{ needs.build-kit.outputs.version }}"
+            "${{ needs.build-kit.outputs.version }}" \
             "${{ github.workspace }}/previous-tag" \
-          "release-notes.md"
+            "release-notes.md"
             
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           branch: release/${{ needs.build-kit.outputs.version }}
-          title: Release v${{ needs.build-kit.outputs.version }}
+          title: ${{ vars.release.pr_title_prefix }}${{ needs.build-kit.outputs.version }}
           body: |
             Release preparation for version ${{ needs.build-kit.outputs.version }}
             
             Generated release notes and spec diffs attached.
-          labels: release
-          base: main
+          labels: ${{ vars.release.labels }}
+          base: ${{ vars.release.base_branch }}
 
-  # Job: Create GitHub Release (only on main branch)
   release:
     if: github.ref == 'refs/heads/main'
     needs: [deploy, build-kit]
@@ -303,7 +249,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         uses: softprops/action-gh-release@v1
         with:
-          # Release configuration
           tag_name: v${{ needs.build-kit.outputs.version }}
           name: v${{ needs.build-kit.outputs.version }}
           body_path: release-notes/release-notes.md
