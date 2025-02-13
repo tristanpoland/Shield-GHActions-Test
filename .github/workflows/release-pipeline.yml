@@ -127,8 +127,13 @@ jobs:
 
           mkdir -p ${{ env.SPEC_CHECK_DIR }}
           
-          if [[ -n "$PREVIOUS_VERSION" ]]; then
-            git checkout "v$PREVIOUS_VERSION"
+          # Get the most recent tag
+          git fetch --tags
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [[ -n "$PREV_TAG" ]]; then
+            echo "Found previous tag: $PREV_TAG"
+            git checkout $PREV_TAG
             cp -r spec/results ./${{ env.SPEC_CHECK_DIR }}/old-specs
             git checkout -
           fi
@@ -138,10 +143,9 @@ jobs:
           cd ..
           
           results_file="${GITHUB_WORKSPACE}/${{ env.SPEC_CHECK_DIR }}/diff-$(date -u +%Y%m%d%H%M%S)"
-          echo "Comparing specs between v$PREVIOUS_VERSION and v$CURRENT_VERSION" > "$results_file"
-          
-          if [[ -n "$PREVIOUS_VERSION" ]]; then
-            ./ci/scripts/compare-release-specs.sh "v$PREVIOUS_VERSION" > "$results_file"
+          if [[ -n "$PREV_TAG" ]]; then
+            echo "Comparing specs with previous release $PREV_TAG" > "$results_file"
+            ./ci/scripts/compare-release-specs.sh "$PREV_TAG" >> "$results_file"
           else
             echo "Initial release - no spec changes to compare" > "$results_file"
           fi
