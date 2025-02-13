@@ -1,0 +1,17 @@
+variables:
+  KIT_NAME: shield
+  GO_VERSION: 1.23.5
+  GO_PLATFORM: linux-amd64
+  FETCH_DEPTH: 0
+  DEFAULT_VERSION_BUMP: patch
+  DEPLOY_ENV: ci-vsphere-baseline
+  CI_ROOT: ${{ github.workspace }}/ci
+  DEFAULT_IAAS: vsphere
+  SPEC_DIR: spec
+  SPEC_RUNNER: ginkgo
+  SPEC_PARALLEL: true
+  RESULTS_DIR: spec-check
+  DIFF_PREFIX: diff-
+  RELEASE_LABELS: release
+  BASE_BRANCH: main
+  PR_TITLE_PREFIX: "Release v"
