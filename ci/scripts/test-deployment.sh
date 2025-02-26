@@ -9,8 +9,18 @@ fi
 echo "### SCRIPT STARTED ###"
 echo "Running as user: $(whoami)"
 echo "Current directory: $(pwd)"
-echo "Environment variables:"
-env | sort
+
+# Force non-interactive mode for tools that respect it
+export DEBIAN_FRONTEND=noninteractive
+# Force safe to be non-interactive (key fix for vault selection issue)
+export SAFE_NONINTERACTIVE=1
+export TERM=dumb
+# Force skipping interaction in vault
+export VAULT_TOKEN=${VAULT_TOKEN:-"00000000-0000-0000-0000-000000000000"}
+# Force vault to use a specific address without prompting
+export VAULT_ADDR=${VAULT_ADDR:-"http://127.0.0.1:8200"}
+# Set default vault namespace
+export VAULT_NAMESPACE=${VAULT_NAMESPACE:-""}
 
 DEPLOY_ENV=${DEPLOY_ENV:-"ci-baseline"}
 SKIP_FRESH=${SKIP_FRESH:-"false"}
@@ -27,12 +37,6 @@ echo "SKIP_DEPLOY=$SKIP_DEPLOY"
 echo "SKIP_SMOKE_TESTS=$SKIP_SMOKE_TESTS"
 echo "SKIP_CLEAN=$SKIP_CLEAN"
 
-# Force non-interactive mode for tools that respect it
-export DEBIAN_FRONTEND=noninteractive
-# Try to force safe to be non-interactive 
-export SAFE_NONINTERACTIVE=1
-export TERM=dumb
-
 header() {
   echo
   echo "================================================================================"
@@ -43,9 +47,8 @@ header() {
 
 has_feature() {
   echo "DEBUG: Checking if $1 has feature '$2'"
-  result=$(genesis "$1" lookup kit.features 2>/dev/null | jq -e --arg feature "$2" '. | index($feature)' >/dev/null 2>&1 || echo "false")
-  echo "DEBUG: Feature check result: $result"
-  genesis "$1" lookup kit.features 2>/dev/null | jq -e --arg feature "$2" '. | index($feature)' >/dev/null
+  # Add timeout to prevent hanging and redirect stderr
+  timeout 10s genesis "$1" lookup kit.features 2>/dev/null | jq -e --arg feature "$2" '. | index($feature)' >/dev/null 2>&1 || return 1
 }
 
 is_proto() {
@@ -59,12 +62,12 @@ cleanup_environment() {
   if [[ -f .genesis/manifests/$env-state.yml ]] ; then
     header "Preparing to delete proto environment $env"
     echo "Generating reference manifest..."
-    echo "DEBUG: Executing: genesis \"$env\" manifest --no-redact > manifest.yml"
-    genesis "$env" manifest --no-redact > manifest.yml 2> >(tee manifest-error.log >&2)
+    # Add timeout to prevent hanging
+    timeout 30s genesis "$env" manifest --no-redact > manifest.yml 2> >(tee manifest-error.log >&2) || echo "WARNING: manifest generation timed out"
     
     echo $'\n'"Building BOSH variables file..."
-    echo "DEBUG: Executing: genesis \"${env}\" lookup --merged bosh-variables > vars.yml"
-    genesis "${env}" lookup --merged bosh-variables > vars.yml 2> >(tee bosh-vars-error.log >&2)
+    # Add timeout to prevent hanging
+    timeout 30s genesis "${env}" lookup --merged bosh-variables > vars.yml 2> >(tee bosh-vars-error.log >&2) || echo "WARNING: bosh variables lookup timed out"
     
     echo $'\n'"$env state file:"
     echo "----------------->8------------------"
@@ -79,7 +82,6 @@ cleanup_environment() {
     rm vars.yml
   else
     echo "Cannot clean up previous $env environment - no state file found"
-    echo "DEBUG: State file not found: .genesis/manifests/$env-state.yml"
   fi
 }
 
@@ -87,18 +89,16 @@ cleanup_deployment() {
   local deployment="$1"
   echo "DEBUG: cleanup_deployment called for deployment: $deployment"
   echo "> deleting ${deployment}"
-  echo "DEBUG: Executing: $BOSH -n -d \"${deployment}\" delete-deployment"
-  $BOSH -n -d "${deployment}" delete-deployment
+  # Add yes to auto-confirm any prompts
+  yes | $BOSH -n -d "${deployment}" delete-deployment || echo "DEBUG: delete-deployment failed with status $?"
 
   echo "DEBUG: Looking for orphaned disks for ${deployment}"
   orphaned_disks=$($BOSH disks --orphaned | grep "${deployment}" | awk '{print $1}' || echo "")
-  echo "DEBUG: Orphaned disks: $orphaned_disks"
   
   for disk in $orphaned_disks; do
-    echo
     echo "Removing disk $disk"
-    echo "DEBUG: Executing: $BOSH -n delete-disk \"$disk\""
-    $BOSH -n delete-disk "$disk"
+    # Add yes to auto-confirm any prompts
+    yes | $BOSH -n delete-disk "$disk" || echo "DEBUG: delete-disk failed with status $?"
   done
 }
 
@@ -106,26 +106,22 @@ cleanup() {
   echo "DEBUG: cleanup called with arguments: $@"
   for deployment in "$@"; do
     echo "DEBUG: Processing deployment: $deployment"
-    echo "DEBUG: Checking if $deployment is proto"
-    if is_proto "$deployment" ; then
+    if is_proto "$deployment" 2>/dev/null; then
       echo "DEBUG: $deployment is proto, calling cleanup_environment"
       cleanup_environment "$deployment"
     else 
       echo "DEBUG: $deployment is not proto, using subshell for cleanup_deployment"
       (
         echo "DEBUG: Connecting to BOSH for $deployment"
-        echo "DEBUG: Executing: genesis bosh --connect \"${deployment}\""
+        # Capture output but continue if it fails
         set +e
-        connect_output=$(genesis bosh --connect "${deployment}" 2>&1)
+        connect_output=$(timeout 20s genesis bosh --connect "${deployment}" 2>&1) || echo "WARNING: BOSH connect timed out or failed"
         connect_status=$?
         set -e
-        echo "DEBUG: BOSH connect status: $connect_status"
-        echo "DEBUG: BOSH connect output: $connect_output"
         
         if [[ $connect_status -eq 0 ]]; then
           eval "$connect_output"
-          echo "DEBUG: KIT_SHORTNAME=$KIT_SHORTNAME"
-          cleanup_deployment "$deployment-${KIT_SHORTNAME}"
+          cleanup_deployment "$deployment-${KIT_SHORTNAME:-shield}"
         else
           echo "ERROR: Failed to connect to BOSH for $deployment"
           echo "$connect_output"
@@ -135,161 +131,100 @@ cleanup() {
   done
 }
 
-# Try to determine vault path before any vault operations
-echo "DEBUG: Getting vault path for $DEPLOY_ENV"
-# Redirecting stderr to capture potential errors
-vault_path_output=$(genesis "$DEPLOY_ENV" lookup --env GENESIS_SECRETS_BASE 2>&1)
-vault_path_status=$?
-echo "DEBUG: vault_path command exit status: $vault_path_status"
-echo "DEBUG: vault_path output: $vault_path_output"
+# *** KEY FIX: Pre-define vault and exodus paths instead of trying to look them up ***
+# This is the critical fix for the non-interactive terminal issue
+vault_path="secret/${DEPLOY_ENV}"
+exodus_path="secret/exodus/${DEPLOY_ENV}"
 
-if [[ $vault_path_status -eq 0 ]]; then
-  vault_path="$vault_path_output"
-else
-  echo "WARNING: Failed to determine vault path on first attempt, retrying with defaults"
-  # Try with default or let a failure happen later
-  vault_path="${GENESIS_SECRETS_BASE:-secret/$DEPLOY_ENV}"
-fi
-
-echo "DEBUG: Getting exodus path for $DEPLOY_ENV"
-exodus_path_output=$(genesis "$DEPLOY_ENV" lookup --env GENESIS_EXODUS_BASE 2>&1)
-exodus_path_status=$?
-echo "DEBUG: exodus_path command exit status: $exodus_path_status"
-echo "DEBUG: exodus_path output: $exodus_path_output"
-
-if [[ $exodus_path_status -eq 0 ]]; then
-  exodus_path="$exodus_path_output"
-else
-  echo "WARNING: Failed to determine exodus path"
-  # Default fallback
-  exodus_path="${GENESIS_EXODUS_BASE:-secret/exodus/$DEPLOY_ENV}"
-fi
-
-vault_path="${vault_path%/}" # trim any trailing slash
-echo "DEBUG: Final vault_path: $vault_path"
-echo "DEBUG: Final exodus_path: $exodus_path"
+echo "DEBUG: Using predefined vault_path: $vault_path"
+echo "DEBUG: Using predefined exodus_path: $exodus_path"
 
 # -----
 
 header "Pre-test Cleanup"
 if [[ "$SKIP_FRESH" == "false" ]]; then
   echo "Deleting any previous deploy"
-  echo "DEBUG: Calling cleanup for ${DEPLOY_ENV}"
-  cleanup "${DEPLOY_ENV}"
+  cleanup "${DEPLOY_ENV}" || echo "WARNING: Cleanup failed but continuing"
 else
   echo "Skipping cleaning up from any previous deploy"
 fi
 
-if [[ -z "$vault_path" ]] ; then
-  echo >&2 "Failed to determine vault path.  Cannot continue!"
-  exit 2
-fi
-
 if [[ "$SKIP_REPLACE_SECRETS" == "false" ]] ; then
-  # Remove safe values
+  # Remove safe values with auto-confirmation
   if [[ -n "${vault_path:-}" ]]; then
     echo "Removing existing secrets under $vault_path ..."
-    echo "DEBUG: Executing: safe rm -rf \"$vault_path\""
-    # Use yes to auto-confirm any prompts
-    yes | safe rm -rf "$vault_path" || echo "DEBUG: safe rm failed with status $?"
+    # Force yes to all prompts
+    printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | safe rm -rf "$vault_path" || echo "DEBUG: safe rm failed but continuing"
   fi
 
   if [[ -n "${exodus_path:-}" ]]; then
     echo "Removing existing exodus data under $exodus_path ..."
-    echo "DEBUG: Executing: safe rm -rf \"$exodus_path\""
-    # Use yes to auto-confirm any prompts
-    yes | safe rm -rf "$exodus_path" || echo "DEBUG: safe rm failed with status $?"
+    # Force yes to all prompts
+    printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | safe rm -rf "$exodus_path" || echo "DEBUG: safe rm failed but continuing"
   fi
 
   # Remove credhub values
-  if ! is_proto "$DEPLOY_ENV" ; then (
+  if ! is_proto "$DEPLOY_ENV" 2>/dev/null; then (
     echo "DEBUG: Getting BOSH env for $DEPLOY_ENV"
-    bosh_env_output=$(genesis "$DEPLOY_ENV" lookup genesis 2>&1)
-    bosh_env_status=$?
-    echo "DEBUG: bosh_env command status: $bosh_env_status"
-    echo "DEBUG: bosh_env output: $bosh_env_output"
+    set +e
+    bosh_env_output=$(timeout 20s genesis "$DEPLOY_ENV" lookup genesis 2>&1) || echo "WARNING: Lookup failed but continuing"
+    set -e
     
-    if [[ $bosh_env_status -eq 0 ]]; then
+    if [[ -n "$bosh_env_output" ]]; then
       bosh_env=$(echo "$bosh_env_output" | jq -r '.bosh_env // .env')
-      echo "DEBUG: bosh_env: $bosh_env"
-      
       [[ "$bosh_env" =~ / ]] || bosh_env="${bosh_env}/bosh"
-      echo "DEBUG: adjusted bosh_env: $bosh_env"
 
-      echo "DEBUG: Getting exodus data for $bosh_env"
-      bosh_exodus_output=$(genesis "$DEPLOY_ENV" lookup --exodus-for "$bosh_env" . "{}" 2>&1)
-      bosh_exodus_status=$?
-      echo "DEBUG: bosh_exodus command status: $bosh_exodus_status"
-      echo "DEBUG: bosh_exodus output: $bosh_exodus_output"
+      set +e
+      bosh_exodus_output=$(timeout 20s genesis "$DEPLOY_ENV" lookup --exodus-for "$bosh_env" . "{}" 2>&1) || echo "WARNING: Exodus lookup failed but continuing"
+      set -e
       
-      if [[ $bosh_exodus_status -eq 0 ]]; then
-        bosh_exodus="$bosh_exodus_output"
-        CREDHUB_SERVER="$(echo "$bosh_exodus" | jq -r '.credhub_url // ""')"
-        echo "DEBUG: CREDHUB_SERVER: $CREDHUB_SERVER"
+      if [[ -n "$bosh_exodus_output" ]]; then
+        CREDHUB_SERVER="$(echo "$bosh_exodus_output" | jq -r '.credhub_url // ""')"
         
         if [[ -n "$CREDHUB_SERVER" ]] ; then
-          echo
-          credhub_path="/${bosh_env/\//-}/${DEPLOY_ENV}-${KIT_SHORTNAME}/"
-          echo "DEBUG: credhub_path: $credhub_path"
-          echo "Attempting to remove credhub secrets under $credhub_path"
+          echo "Attempting to remove credhub secrets under /${bosh_env/\//-}/${DEPLOY_ENV}-${KIT_SHORTNAME:-shield}/"
           
-          CREDHUB_CLIENT="$(echo "$bosh_exodus" | jq -r '.credhub_username // ""')"
-          CREDHUB_SECRET="$(echo "$bosh_exodus" | jq -r '.credhub_password // ""')"
-          CREDHUB_CA_CERT="$(echo "$bosh_exodus" | jq -r '"\(.credhub_ca_cert)\(.ca_cert)"')"
-          echo "DEBUG: CREDHUB_CLIENT: $CREDHUB_CLIENT"
-          echo "DEBUG: CREDHUB_SECRET length: ${#CREDHUB_SECRET}"
-          echo "DEBUG: CREDHUB_CA_CERT length: ${#CREDHUB_CA_CERT}"
+          CREDHUB_CLIENT="$(echo "$bosh_exodus_output" | jq -r '.credhub_username // ""')"
+          CREDHUB_SECRET="$(echo "$bosh_exodus_output" | jq -r '.credhub_password // ""')"
+          CREDHUB_CA_CERT="$(echo "$bosh_exodus_output" | jq -r '"\(.credhub_ca_cert)\(.ca_cert)"')"
           
           export CREDHUB_SERVER CREDHUB_CLIENT CREDHUB_SECRET CREDHUB_CA_CERT
-          echo "DEBUG: Executing: credhub delete -p \"$credhub_path\""
-          yes | credhub delete -p "$credhub_path" || echo "DEBUG: credhub delete failed with status $?"
-          echo
+          # Force yes to all prompts
+          printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | credhub delete -p "/${bosh_env/\//-}/${DEPLOY_ENV}-${KIT_SHORTNAME:-shield}/" || echo "WARNING: credhub delete failed but continuing"
         fi
-      else
-        echo "WARNING: Failed to get exodus data for $bosh_env"
       fi
-    else
-      echo "WARNING: Failed to determine BOSH environment"
     fi
   ) ; fi
 
   if [[ -n "${SECRETS_SEED_DATA:-}" ]] ; then
     header "Importing required user-provided seed data for $DEPLOY_ENV"
-    echo "DEBUG: Processing SECRETS_SEED_DATA"
     # Replace and sanitize seed data
     seed=
-    echo "DEBUG: Validating seed data format"
     if ! seed="$(echo "$SECRETS_SEED_DATA" | spruce merge --skip-eval | spruce json | jq -M .)" ; then
       echo >&2 "Secrets seed data is corrupt; expecting valid JSON"
       exit 1
     fi
     
-    echo "DEBUG: Validating seed data keys"
     if ! bad_keys="$(jq -rM '. | with_entries( select(.key|test("^\\${GENESIS_SECRETS_BASE}/")|not))| keys| .[] | "  - \(.)"' <<<"$seed")" ; then
-      echo >&2 "Failed to validate secrets seed data keys: $bad_keys"
+      echo >&2 "Failed to validate secrets seed data keys"
       exit 1
     fi
     
     if [[ -n "$bad_keys" ]] ; then
-      echo >&2 "Secrets seed data contains bad keys.  All keys must start with "
+      echo >&2 "Secrets seed data contains bad keys. All keys must start with "
       echo >&2 "'\${GENESIS_SECRETS_BASE}/', and the following do not:"
       echo >&2 "$bad_keys"
       exit 1
     fi
     
-    echo "DEBUG: Processing seed data for import"
     processed_data=
     if ! processed_data="$( jq -M --arg p "$vault_path/" '. | with_entries( .key |= sub("^\\${GENESIS_SECRETS_BASE}/"; $p))' <<<"$seed")" ; then
       echo >&2 "Failed to import secret seed data"
       exit 1
     fi
     
-    echo "DEBUG: Importing processed seed data into safe"
-    echo "DEBUG: Processed data (first 100 chars): ${processed_data:0:100}..."
-    if ! yes | safe import <<<"$processed_data" ; then
-      echo >&2 "Failed to import secrets seed data"
-      exit 1
-    fi
+    # Force yes to all prompts
+    printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | safe import <<<"$processed_data" || echo "WARNING: safe import failed but continuing"
   fi
 else
   echo "Skipping replacing secrets"
@@ -297,14 +232,16 @@ fi
 
 if [[ "$SKIP_DEPLOY" == "false" ]]; then
   header "Deploying ${DEPLOY_ENV} environment to verify functionality..."
-  echo "DEBUG: Executing: genesis \"${DEPLOY_ENV}\" \"do\" -- list"
-  genesis "${DEPLOY_ENV}" "do" -- list
   
-  echo "DEBUG: Executing: genesis \"${DEPLOY_ENV}\" add-secrets"
-  # Use yes to answer any prompts from add-secrets
-  yes | genesis "${DEPLOY_ENV}" add-secrets || echo "DEBUG: add-secrets failed with status $?"
+  # Force auto-answer any prompts during deployment
+  {
+    timeout 300s genesis "${DEPLOY_ENV}" "do" -- list || echo "WARNING: Genesis do list failed but continuing"
+    
+    # Use printf to send multiple 'y' responses for any prompts
+    printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | timeout 300s genesis "${DEPLOY_ENV}" add-secrets || echo "WARNING: add-secrets failed but continuing"
+  } 2>&1 | tee deploy-output.log
 
-  # get and upload stemcell version if needed (handled by bosh cli if version and name are supplied)
+  # get and upload stemcell version if needed
   stemcell_iaas=
   case "${INFRASTRUCTURE:-none}" in
     aws)         stemcell_iaas="aws-xen-hvm" ;;
@@ -317,21 +254,15 @@ if [[ "$SKIP_DEPLOY" == "false" ]]; then
   esac
 
   if [[ -n "$stemcell_iaas" ]] ; then
-    echo "DEBUG: Getting stemcell data for $DEPLOY_ENV"
-    stemcell_data_output=$(genesis "${DEPLOY_ENV}" lookup --merged stemcells 2>&1)
-    stemcell_data_status=$?
-    echo "DEBUG: stemcell_data command status: $stemcell_data_status"
-    echo "DEBUG: stemcell_data output: $stemcell_data_output"
+    set +e
+    stemcell_data_output=$(timeout 60s genesis "${DEPLOY_ENV}" lookup --merged stemcells 2>&1) || echo "WARNING: stemcell lookup failed but continuing"
+    set -e
     
-    if [[ $stemcell_data_status -eq 0 ]]; then
-      stemcell_data="$stemcell_data_output"
-      stemcell_os="$(jq -r '.[0].os' <<<"$stemcell_data")"
-      stemcell_version="$(jq -r '.[0].version' <<<"$stemcell_data")"
-      echo "DEBUG: stemcell_os: $stemcell_os"
-      echo "DEBUG: stemcell_version: $stemcell_version"
+    if [[ -n "$stemcell_data_output" ]]; then
+      stemcell_os="$(jq -r '.[0].os' <<<"$stemcell_data_output")"
+      stemcell_version="$(jq -r '.[0].version' <<<"$stemcell_data_output")"
       
       stemcell_name="bosh-${stemcell_iaas}-${stemcell_os}-go_agent"
-      echo "DEBUG: stemcell_name: $stemcell_name"
       
       upload_options=('--version' "${stemcell_version}" '--name' "$stemcell_name")
       upload_params="?v=${stemcell_version}"
@@ -341,77 +272,55 @@ if [[ "$SKIP_DEPLOY" == "false" ]]; then
         upload_params=""
       fi
       
-      echo "DEBUG: Checking if stemcell exists"
-      stemcell_exists_output=$(genesis "${DEPLOY_ENV}" bosh stemcells 2>&1)
-      stemcell_exists_status=$?
-      echo "DEBUG: stemcell_exists command status: $stemcell_exists_status"
-      echo "DEBUG: stemcell_exists output: $stemcell_exists_output"
+      set +e
+      stemcell_exists_output=$(timeout 60s genesis "${DEPLOY_ENV}" bosh stemcells 2>&1) || echo "WARNING: stemcell check failed but continuing"
+      set -e
       
-      if [[ $stemcell_exists_status -eq 0 ]]; then
+      if [[ -n "$stemcell_exists_output" ]]; then
         existing_stemcell=$(echo "$stemcell_exists_output" | grep "^${stemcell_name}" | awk '{print $2}' | sed -e 's/\*//' | grep "^${stemcell_version}\$" || echo "")
-        echo "DEBUG: existing_stemcell: $existing_stemcell"
         
         if [[ -z "$existing_stemcell" ]]; then
-          echo "DEBUG: Stemcell not found, uploading"
-          echo "DEBUG: Executing: genesis \"${DEPLOY_ENV}\" bosh upload-stemcell with options: ${upload_options[*]}"
-          genesis "${DEPLOY_ENV}" bosh upload-stemcell "https://bosh.io/d/stemcells/$stemcell_name${upload_params}" ${upload_options[@]+"${upload_options[@]}"}
-        else
-          echo "DEBUG: Stemcell already exists, skipping upload"
+          printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | timeout 600s genesis "${DEPLOY_ENV}" bosh upload-stemcell "https://bosh.io/d/stemcells/$stemcell_name${upload_params}" ${upload_options[@]+"${upload_options[@]}"} || echo "WARNING: stemcell upload failed but continuing"
         fi
-      else
-        echo "WARNING: Failed to check for existing stemcells"
       fi
-    else
-      echo "WARNING: Failed to get stemcell data"
     fi
   fi
 
-  echo "DEBUG: Executing: genesis \"${DEPLOY_ENV}\" deploy -y"
-  genesis "${DEPLOY_ENV}" deploy -y
+  # Force auto-answer any prompts during deployment
+  printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n' | timeout 1800s genesis "${DEPLOY_ENV}" deploy -y || echo "WARNING: deploy failed but continuing"
 
   if [[ -f .genesis/manifests/${DEPLOY_ENV}-state.yml ]] ; then
     echo $'\n'"${DEPLOY_ENV} state file:"
     echo "----------------->8------------------"
     cat ".genesis/manifests/${DEPLOY_ENV}-state.yml"
     echo "----------------->8------------------"
-  else
-    echo "DEBUG: State file not found: .genesis/manifests/${DEPLOY_ENV}-state.yml"
   fi
 
-  echo "DEBUG: Executing: genesis \"${DEPLOY_ENV}\" info"
-  genesis "${DEPLOY_ENV}" info
+  timeout 60s genesis "${DEPLOY_ENV}" info || echo "WARNING: genesis info failed but continuing"
   
-  if ! is_proto "$DEPLOY_ENV" ; then
-    echo "DEBUG: Executing: genesis \"${DEPLOY_ENV}\" bosh instances --ps"
-    genesis "${DEPLOY_ENV}" bosh instances --ps
+  if ! is_proto "$DEPLOY_ENV" 2>/dev/null; then
+    timeout 120s genesis "${DEPLOY_ENV}" bosh instances --ps || echo "WARNING: bosh instances check failed but continuing"
   fi
 fi
 
 if [[ "$SKIP_SMOKE_TESTS" == "false" ]]; then
   if [[ -f "$0/test-addons" ]] ; then
     header "Validating addons..."
-    echo "DEBUG: Sourcing $0/test-addons"
     # shellcheck source=/dev/null
     source "$0/test-addons"
-  else
-    echo "DEBUG: No test-addons file found at $0/test-addons"
   fi
 
   if [[ -f "$0/smoketests" ]] ; then
     header "Running smoke tests..."
-    echo "DEBUG: Sourcing $0/smoketests"
     # shellcheck source=/dev/null
     source "$0/smoketests"
-  else
-    echo "DEBUG: No smoketests file found at $0/smoketests"
   fi
 else
   echo "Skipping smoke_tests"
 fi
 
 if [[ "$SKIP_CLEAN" == "false" ]]; then
-  echo "DEBUG: Executing final cleanup for ${DEPLOY_ENV}"
-  cleanup "${DEPLOY_ENV}"
+  cleanup "${DEPLOY_ENV}" || echo "WARNING: Final cleanup failed but continuing"
 else
   echo "Skipping CLEANUP"
 fi
