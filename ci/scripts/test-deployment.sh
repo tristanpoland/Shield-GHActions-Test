@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eu
 
+echo "Running test-deployment.sh"
+
 # Environment variables with defaults
 DEPLOY_ENV=${DEPLOY_ENV:-"ci-baseline"}
 SKIP_FRESH=${SKIP_FRESH:-"false"}
@@ -75,6 +77,7 @@ cleanup() {
 
 # Initialize Genesis deployment
 cd "$WORK_DIR"
+echo "Initializing Genesis deployment..."
 genesis init --kit shield
 
 # Copy environment files from CI
