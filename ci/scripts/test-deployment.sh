@@ -83,7 +83,7 @@ echo $(bosh --version)
 git config --global user.email "genesis@genesis"
 git config --global user.name "Genesis CI"
 
-genesis init --kit shield
+yes | genesis init --kit shield
 
 # Copy environment files from CI
 cp -r "${GITHUB_WORKSPACE}/ci/envs/"* .
