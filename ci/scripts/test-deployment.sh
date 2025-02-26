@@ -78,6 +78,8 @@ cleanup() {
 # Initialize Genesis deployment
 cd "$WORK_DIR"
 echo "Initializing Genesis deployment..."
+echo $(bosh --version)
+
 genesis init --kit shield
 
 # Copy environment files from CI
