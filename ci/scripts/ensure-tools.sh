@@ -12,14 +12,14 @@ wget https://github.com/cloudfoundry/bosh-cli/releases/download/v7.8.6/bosh-cli-
 tar -xvf credhub-linux-amd64-2.9.41.tgz
 
 # Set up binaries
-sudo mv ./bosh-cli-7.8.6-linux-amd64 /bin/bosh
+sudo mv ./bosh-cli-7.8.6-linux-amd64 /usr/local/bin/bosh
 sudo mv ./credhub /bin/credhub
 sudo mv ./safe-linux-amd64 /bin/safe
 sudo mv ./spruce-linux-amd64 /bin/spruce
 sudo mv ./genesis /bin/genesis
 
 chmod u+x ./ci/scripts/compare-release-specs.sh
-chmod u+x /bin/bosh
+chmod u+x /usr/local/bin/bosh
 chmod u+x /bin/credhub
 chmod u+x /bin/safe
 chmod u+x /bin/spruce
@@ -30,7 +30,7 @@ wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/sh
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
 sudo apt update && sudo apt install vault
 
-echo $(ls -la /bin/bosh)
+echo $(ls -la /usr/local/bin/bosh)
 
 echo "installed:"
 echo "bosh: $(bosh --version)"
