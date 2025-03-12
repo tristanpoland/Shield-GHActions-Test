@@ -62,17 +62,26 @@ if ! command -v vault &> /dev/null; then
   fi
 fi
 
-# Start Vault in development mode
+# Start Vault in development mode as a background process
 status "Starting Vault in development mode"
-vault server -dev -dev-root-token-id=${VAULT_TOKEN} -dev-listen-address=0.0.0.0:${VAULT_PORT} > ${VAULT_DIR}/vault.log 2>&1 &
+nohup vault server -dev -dev-root-token-id=${VAULT_TOKEN} -dev-listen-address=0.0.0.0:${VAULT_PORT} > ${VAULT_DIR}/vault.log 2>&1 &
 VAULT_PID=$!
 
-# Ensure Vault is stopped on script exit
-trap "status 'Stopping Vault'; kill $VAULT_PID 2>/dev/null || true" EXIT
+# Save PID to file for later cleanup
+echo $VAULT_PID > ${VAULT_DIR}/vault.pid
+status "Vault process started with PID: $VAULT_PID"
 
 # Wait for Vault to start
 status "Waiting for Vault to start"
-until curl -s http://127.0.0.1:${VAULT_PORT}/v1/sys/health >/dev/null; do
+MAX_ATTEMPTS=30
+ATTEMPTS=0
+while ! curl -s http://127.0.0.1:${VAULT_PORT}/v1/sys/health >/dev/null; do
+  ATTEMPTS=$((ATTEMPTS+1))
+  if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+    echo -e "${RED}Error: Vault failed to start after $MAX_ATTEMPTS attempts.${NC}"
+    kill $VAULT_PID 2>/dev/null || true
+    exit 1
+  fi
   echo -n "."
   sleep 1
 done
@@ -86,7 +95,7 @@ status "Vault is running at http://127.0.0.1:${VAULT_PORT}"
 
 # Setup some initial configuration - enable KV secrets engine
 status "Enabling KV secrets engine"
-vault secrets enable -version=2 kv
+vault secrets enable -version=2 kv || echo "KV secrets engine already enabled"
 
 # Create a policy for your application
 status "Creating app policy"
@@ -150,6 +159,28 @@ EOF
 
 chmod +x load-vault-secrets.sh
 
+# Create cleanup script
+status "Creating cleanup script for Vault"
+cat > cleanup-vault.sh <<EOF
+#!/bin/bash
+# This script stops the Vault server
+
+if [ -f "${VAULT_DIR}/vault.pid" ]; then
+  VAULT_PID=\$(cat ${VAULT_DIR}/vault.pid)
+  if ps -p \$VAULT_PID > /dev/null; then
+    echo "Stopping Vault server (PID: \$VAULT_PID)"
+    kill \$VAULT_PID
+  else
+    echo "Vault server is not running"
+  fi
+  rm -f ${VAULT_DIR}/vault.pid
+else
+  echo "No Vault PID file found"
+fi
+EOF
+
+chmod +x cleanup-vault.sh
+
 # Optional: Create a script to help format GitHub secrets for import
 status "Creating helper script for GitHub secrets formatting"
 cat > format-github-secrets.sh <<EOF
@@ -181,11 +212,8 @@ EOF
 
 chmod +x format-github-secrets.sh
 
-status "Example of how to use the secrets formatter:"
-echo "./format-github-secrets.sh GITHUB_TOKEN=your_token GITHUB_API_KEY=your_api_key"
-
 # Display usage information
-echo -e "\n${GREEN}Local Vault successfully deployed!${NC}"
+echo -e "\n${GREEN}Local Vault successfully deployed in background!${NC}"
 echo -e "Vault UI: http://127.0.0.1:${VAULT_PORT}/ui"
 echo -e "Vault Token: ${VAULT_TOKEN}"
 echo ""
@@ -193,7 +221,10 @@ echo "To use Vault in your tests:"
 echo "1. Source the environment: export VAULT_ADDR=http://127.0.0.1:${VAULT_PORT} VAULT_TOKEN=${VAULT_TOKEN}"
 echo "2. Run './load-vault-secrets.sh' to load secrets as environment variables"
 echo ""
-echo "To keep Vault running, keep this terminal open. Press Ctrl+C to stop Vault."
+echo "To stop Vault when done: ./cleanup-vault.sh"
 
-# Keep the script running to maintain Vault process
-wait $VAULT_PID
+# Export environment variables for the current GitHub Action workflow
+echo "VAULT_ADDR=http://127.0.0.1:${VAULT_PORT}" >> $GITHUB_ENV
+echo "VAULT_TOKEN=${VAULT_TOKEN}" >> $GITHUB_ENV
+
+# Script ends here, with Vault running in the background
