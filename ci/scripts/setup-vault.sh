@@ -1,0 +1,199 @@
+#!/bin/bash
+set -e
+
+# Configuration
+VAULT_VERSION="1.15.2"  # Adjust version as needed
+VAULT_PORT=8200
+VAULT_TOKEN="vault-test-token"  # This is for local testing only
+VAULT_DIR="./vault-data"
+GITHUB_SECRETS_FILE="github-secrets.json"  # File containing GitHub secrets
+
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Function to check if command exists
+check_command() {
+  if ! command -v $1 &> /dev/null; then
+    echo -e "${RED}Error: $1 is required but not installed.${NC}"
+    exit 1
+  fi
+}
+
+# Function to display status
+status() {
+  echo -e "${BLUE}==>${NC} $1"
+}
+
+# Check for required commands
+check_command curl
+check_command jq
+
+# Create directory for Vault data
+status "Creating Vault data directory"
+mkdir -p ${VAULT_DIR}
+
+# Download Vault if not already installed
+if ! command -v vault &> /dev/null; then
+  status "Downloading Vault ${VAULT_VERSION}"
+  
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ARCH=$(uname -m)
+  if [ "$ARCH" = "x86_64" ]; then
+    ARCH="amd64"
+  elif [[ "$ARCH" == arm* ]] || [[ "$ARCH" = "aarch64" ]]; then
+    ARCH="arm64"
+  fi
+  
+  DOWNLOAD_URL="https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_${OS}_${ARCH}.zip"
+  
+  curl -s -o vault.zip ${DOWNLOAD_URL}
+  unzip -o vault.zip
+  chmod +x vault
+  
+  # Move to a location in PATH or use locally
+  if [ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]; then
+    mv vault /usr/local/bin/
+  else
+    status "Vault binary downloaded to current directory. Using local path."
+    export PATH=$PATH:$(pwd)
+  fi
+fi
+
+# Start Vault in development mode
+status "Starting Vault in development mode"
+vault server -dev -dev-root-token-id=${VAULT_TOKEN} -dev-listen-address=0.0.0.0:${VAULT_PORT} > ${VAULT_DIR}/vault.log 2>&1 &
+VAULT_PID=$!
+
+# Ensure Vault is stopped on script exit
+trap "status 'Stopping Vault'; kill $VAULT_PID 2>/dev/null || true" EXIT
+
+# Wait for Vault to start
+status "Waiting for Vault to start"
+until curl -s http://127.0.0.1:${VAULT_PORT}/v1/sys/health >/dev/null; do
+  echo -n "."
+  sleep 1
+done
+echo ""
+
+# Configure environment for vault CLI
+export VAULT_ADDR=http://127.0.0.1:${VAULT_PORT}
+export VAULT_TOKEN=${VAULT_TOKEN}
+
+status "Vault is running at http://127.0.0.1:${VAULT_PORT}"
+
+# Setup some initial configuration - enable KV secrets engine
+status "Enabling KV secrets engine"
+vault secrets enable -version=2 kv
+
+# Create a policy for your application
+status "Creating app policy"
+cat > ${VAULT_DIR}/app-policy.hcl <<EOF
+path "kv/data/github/*" {
+  capabilities = ["read"]
+}
+EOF
+
+vault policy write app-policy ${VAULT_DIR}/app-policy.hcl
+
+# Process and load GitHub secrets
+if [ -f "${GITHUB_SECRETS_FILE}" ]; then
+  status "Loading GitHub secrets from ${GITHUB_SECRETS_FILE}"
+  
+  # Process each secret in the JSON file
+  jq -c '.[]' ${GITHUB_SECRETS_FILE} | while read -r secret; do
+    name=$(echo $secret | jq -r '.name')
+    value=$(echo $secret | jq -r '.value')
+    
+    # Store secret in Vault
+    vault kv put kv/github/${name} value="${value}"
+    echo "Secret ${name} loaded into Vault"
+  done
+else
+  # If no secrets file exists, we'll load from environment variables
+  status "No GitHub secrets file found, attempting to load from environment variables"
+  
+  # Find all environment variables that start with GITHUB_
+  env | grep "^GITHUB_" | while read -r secret; do
+    name=${secret%%=*}
+    value=${secret#*=}
+    
+    # Store secret in Vault
+    vault kv put kv/github/${name} value="${value}"
+    echo "Secret ${name} loaded into Vault from environment"
+  done
+fi
+
+# Create a helper to load secrets in your CI pipeline
+status "Creating helper script for CI pipeline"
+cat > load-vault-secrets.sh <<EOF
+#!/bin/bash
+# This script exports Vault secrets as environment variables for your CI pipeline
+
+export VAULT_ADDR=http://127.0.0.1:${VAULT_PORT}
+export VAULT_TOKEN=${VAULT_TOKEN}
+
+# List all secrets in the GitHub path
+SECRETS=\$(vault kv list -format=json kv/github/ | jq -r '.[]')
+
+for SECRET in \$SECRETS; do
+  # Get the secret value
+  VALUE=\$(vault kv get -field=value kv/github/\$SECRET)
+  
+  # Export as environment variable
+  export \$SECRET="\$VALUE"
+  echo "Exported \$SECRET to environment"
+done
+EOF
+
+chmod +x load-vault-secrets.sh
+
+# Optional: Create a script to help format GitHub secrets for import
+status "Creating helper script for GitHub secrets formatting"
+cat > format-github-secrets.sh <<EOF
+#!/bin/bash
+# This script formats GitHub secrets for import into Vault
+# Usage: ./format-github-secrets.sh SECRET_NAME1=value1 SECRET_NAME2=value2
+
+output="["
+
+first=true
+for secret in "\$@"; do
+  name=\${secret%%=*}
+  value=\${secret#*=}
+  
+  if [ "\$first" = true ]; then
+    first=false
+  else
+    output="\$output,"
+  fi
+  
+  output="\$output{\"name\":\"\$name\",\"value\":\"\$value\"}"
+done
+
+output="\$output]"
+
+echo \$output > ${GITHUB_SECRETS_FILE}
+echo "Generated ${GITHUB_SECRETS_FILE} with \$# secrets"
+EOF
+
+chmod +x format-github-secrets.sh
+
+status "Example of how to use the secrets formatter:"
+echo "./format-github-secrets.sh GITHUB_TOKEN=your_token GITHUB_API_KEY=your_api_key"
+
+# Display usage information
+echo -e "\n${GREEN}Local Vault successfully deployed!${NC}"
+echo -e "Vault UI: http://127.0.0.1:${VAULT_PORT}/ui"
+echo -e "Vault Token: ${VAULT_TOKEN}"
+echo ""
+echo "To use Vault in your tests:"
+echo "1. Source the environment: export VAULT_ADDR=http://127.0.0.1:${VAULT_PORT} VAULT_TOKEN=${VAULT_TOKEN}"
+echo "2. Run './load-vault-secrets.sh' to load secrets as environment variables"
+echo ""
+echo "To keep Vault running, keep this terminal open. Press Ctrl+C to stop Vault."
+
+# Keep the script running to maintain Vault process
+wait $VAULT_PID
