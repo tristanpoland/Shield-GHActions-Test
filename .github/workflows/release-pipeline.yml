@@ -212,6 +212,7 @@ jobs:
         run: |
           sudo chmod -R a+rwx ./**
           ./ci/scripts/ensure-tools.sh
+          ./ci/scripts/init-vault.sh
           ./ci/scripts/test-deployment.sh
 
   prepare-release:
