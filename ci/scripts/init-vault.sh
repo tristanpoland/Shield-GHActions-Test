@@ -223,6 +223,9 @@ echo "2. Run './load-vault-secrets.sh' to load secrets as environment variables"
 echo ""
 echo "To stop Vault when done: ./cleanup-vault.sh"
 
+export VAULT_URI="http://localhost:${VAULT_PORT}"
+export VAULT_TOKEN=${VAULT_TOKEN}
+
 # Export environment variables for the current GitHub Action workflow
 echo "VAULT_ADDR=http://127.0.0.1:${VAULT_PORT}" >> $GITHUB_ENV
 echo "VAULT_TOKEN=${VAULT_TOKEN}" >> $GITHUB_ENV
