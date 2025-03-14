@@ -1,6 +1,9 @@
 #!/bin/bash
 set -eu
 
+echo $VAULT_TOKEN
+echo $VAULT_URI
+
 # Resource Directories
 export CI_ROOT="git-ci"
 export DEPLOY_ENV="${DEPLOY_ENV:-"ci-baseline"}"
