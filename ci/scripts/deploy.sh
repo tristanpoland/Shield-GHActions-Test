@@ -7,8 +7,13 @@ echo "Retrieving environment variables for deployment..."
 source ./vault-env.tmp
 
 # Echo a version number into /version/number in one is not specified
+# Create version number file if it doesn't exist
+if [[ -z "${VERSION_FROM:-}" ]]; then
+    export VERSION_FROM="./version/number"
+fi
 if [[ ! -f "${VERSION_FROM}" ]]; then
-  echo "0.0.1" > "${VERSION_FROM}"
+    mkdir -p "$(dirname "${VERSION_FROM}")"
+    echo "0.0.1" > "${VERSION_FROM}"
 fi
 
 echo "VAULT_TOKEN: ${VAULT_TOKEN:-[not set]}"
@@ -18,7 +23,6 @@ echo "VAULT_URI: ${VAULT_URI:-[not set]}"
 export CI_ROOT="git-ci"
 export DEPLOY_ENV="${DEPLOY_ENV:-"ci-baseline"}"
 export KEEP_STATE="${KEEP_STATE:-"false"}"
-export VERSION_FROM="version/number"
 export GIT_NAME="${GIT_NAME:-"Genesis CI Bot"}"
 export GIT_EMAIL="${GIT_EMAIL:-"genesis-ci@rubidiumstudios.com"}"
 
