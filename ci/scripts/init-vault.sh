@@ -224,8 +224,8 @@ echo ""
 echo "To stop Vault when done: ./cleanup-vault.sh"
 
 # Export variables to GitHub Actions environment
-echo "VAULT_URI=http://localhost:${VAULT_PORT}" >> $GITHUB_ENV
-echo "VAULT_TOKEN=${VAULT_TOKEN}" >> $GITHUB_ENV
+echo "VAULT_URI=http://127.0.0.1:${VAULT_PORT}" > vault-env.tmp
+echo "VAULT_TOKEN=${VAULT_TOKEN}" >> vault-env.tmp
 
 # Export environment variables for the current GitHub Action workflow
 echo "VAULT_ADDR=http://127.0.0.1:${VAULT_PORT}" >> $GITHUB_ENV

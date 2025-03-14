@@ -2,14 +2,10 @@
 set -eu
 
 echo "Retrieving environment variables for deployment..."
+source ./vault-env.tmp
+
 echo "VAULT_TOKEN: ${VAULT_TOKEN:-[not set]}"
 echo "VAULT_URI: ${VAULT_URI:-[not set]}"
-# Check if VAULT_TOKEN is actually set in the environment
-echo "--------------------------------------------------"
-echo "Environment dump for debugging:"
-printenv | grep -i vault || echo "No VAULT variables found in environment"
-echo "Shell: $SHELL, User: $(whoami)"
-echo "--------------------------------------------------"
 
 # Resource Directories
 export CI_ROOT="git-ci"
