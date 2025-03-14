@@ -236,7 +236,7 @@ if [[ "$SKIP_DEPLOY" == "false" ]]; then
   # Force auto-answer any prompts during deployment
   {
     # Try genesis do command but continue on failure
-
+    cd ./ci/envs/
     set +e
     genesis_output=$(timeout 300s genesis "${DEPLOY_ENV}" "do" -- list 2>&1) || true
     clean_genesis=$(strip_ansi "$genesis_output")
