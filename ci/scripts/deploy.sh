@@ -6,6 +6,11 @@ echo "Retrieving environment variables for deployment..."
 
 source ./vault-env.tmp
 
+# Echo a version number into /version/number in one is not specified
+if [[ ! -f "${VERSION_FROM}" ]]; then
+  echo "0.0.1" > "${VERSION_FROM}"
+fi
+
 echo "VAULT_TOKEN: ${VAULT_TOKEN:-[not set]}"
 echo "VAULT_URI: ${VAULT_URI:-[not set]}"
 
@@ -34,8 +39,12 @@ test -n "${VAULT_URI:-}"          || bail "VAULT_URI must be set to an address f
 test -n "${VAULT_TOKEN:-}"        || bail "VAULT_TOKEN must be set to something; it will be used for connecting to Vault."
 
 [[ -n "${TAG_ROOT:-}" && -n "${BUILD_ROOT:-}" ]] && bail "Cannot specify both 'TAG_ROOT' and 'BUILD_ROOT'"
+
+#  If neither TAG_ROOT nor BUILD_ROOT is set, assume current directory as BUILD_ROOT
+#  NOTE: The tarball of the built kit is expected to be in the current directory if this is to work.
 if [[ -z "${TAG_ROOT:-}" && -z "${BUILD_ROOT:-}" ]]; then
-    echo "WARNING: Neither TAG_ROOT nor BUILD_ROOT specified. Assuming current directory as BUILD_ROOT."
+    echo "WARNING: Neither TAG_ROOT nor BUILD_ROOT was specified. Assuming current directory as BUILD_ROOT."
+    echo "NOTE: The tarball of the built kit is expected to be in the current directory if this is to work."
     export BUILD_ROOT="$(pwd)"
 fi
 
