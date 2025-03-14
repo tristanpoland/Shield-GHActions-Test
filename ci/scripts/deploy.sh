@@ -1,8 +1,10 @@
 #!/bin/bash
 set -eu
 
+echo "Retrieving environment variables for deployment..."
 echo $VAULT_TOKEN
 echo $VAULT_URI
+echo "--------------------------------------------------"
 
 # Resource Directories
 export CI_ROOT="git-ci"
