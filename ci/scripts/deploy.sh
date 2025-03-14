@@ -3,8 +3,9 @@ set -eu
 
 echo "Retrieving environment variables for deployment..."
 # Load Vault environment variables
-
 source ./vault-env.tmp
+
+echo "operating in working dir: $(pwd)"
 
 # Echo a version number into /version/number in one is not specified
 # Create version number file if it doesn't exist
