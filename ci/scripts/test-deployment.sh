@@ -233,8 +233,6 @@ fi
 if [[ "$SKIP_DEPLOY" == "false" ]]; then
   header "Deploying ${DEPLOY_ENV} environment to verify functionality..."
 
-  export GENESIS_STACK_TRACE="yes"
-
   # Force auto-answer any prompts during deployment
   {
     # Try genesis do command but continue on failure

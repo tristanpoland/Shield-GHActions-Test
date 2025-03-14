@@ -203,6 +203,7 @@ jobs:
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
           GENESIS_SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          GENESIS_STACK_TRACE: "yes"
           BOSH_CLIENT: ${{ secrets.BOSH_CLIENT }}
           BOSH_CLIENT_SECRET: ${{ secrets.BOSH_CLIENT_SECRET }}
           BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
