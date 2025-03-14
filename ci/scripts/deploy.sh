@@ -2,6 +2,8 @@
 set -eu
 
 echo "Retrieving environment variables for deployment..."
+# Load Vault environment variables
+
 source ./vault-env.tmp
 
 echo "VAULT_TOKEN: ${VAULT_TOKEN:-[not set]}"
@@ -32,7 +34,10 @@ test -n "${VAULT_URI:-}"          || bail "VAULT_URI must be set to an address f
 test -n "${VAULT_TOKEN:-}"        || bail "VAULT_TOKEN must be set to something; it will be used for connecting to Vault."
 
 [[ -n "${TAG_ROOT:-}" && -n "${BUILD_ROOT:-}" ]] && bail "Cannot specify both 'TAG_ROOT' and 'BUILD_ROOT'"
-[[ -z "${TAG_ROOT:-}" && -z "${BUILD_ROOT:-}" ]] && bail "Must specify one of 'TAG_ROOT' or 'BUILD_ROOT'"
+if [[ -z "${TAG_ROOT:-}" && -z "${BUILD_ROOT:-}" ]]; then
+    echo "WARNING: Neither TAG_ROOT nor BUILD_ROOT specified. Assuming current directory as BUILD_ROOT."
+    export BUILD_ROOT="$(pwd)"
+fi
 
 WORKDIR="work/${KIT_SHORTNAME}-deployments"
 VERSION=

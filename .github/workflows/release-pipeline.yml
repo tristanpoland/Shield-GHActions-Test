@@ -211,7 +211,7 @@ jobs:
           SECRETS_SEED_DATA: ${{ secrets.SECRETS_SEED_DATA }}
           KIT_VERSION: ${{ needs.build-kit.outputs.version }}
           KIT_SHORTNAME: "shield"
-          TAG_ROOT: "git-latest-tag"
+          BUILD_ROOT: "build"
         run: |
           sudo chmod -R a+rwx ./**
           ./ci/scripts/ensure-tools.sh
