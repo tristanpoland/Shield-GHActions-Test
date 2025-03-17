@@ -74,10 +74,10 @@ jobs:
           ./ci/scripts/ensure-tools.sh
           
           genesis compile-kit --force -v "$KIT_VERSION" -n "${{ env.KIT_NAME }}"
-          sudo mkdir -p /${{ env.BUILD_ROOT }}/
-          sudo chmod -R a+rwx /${{ env.BUILD_ROOT }}/
-          cp ./${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz /${{ env.BUILD_ROOT }}/
-          ls -lah /${{ env.BUILD_ROOT }}/
+          sudo mkdir -p ${{ env.BUILD_ROOT }}/
+          sudo chmod -R a+rwx ${{ env.BUILD_ROOT }}/
+          cp ./${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz ${{ env.BUILD_ROOT }}/
+          ls -lah ${{ env.BUILD_ROOT }}/
           echo "Build completed successfully"
           
       - uses: actions/upload-artifact@v4
