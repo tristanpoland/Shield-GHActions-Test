@@ -73,6 +73,7 @@ jobs:
           ./ci/scripts/ensure-tools.sh
           
           genesis compile-kit --force -v "$KIT_VERSION" -n "${{ env.KIT_NAME }}"
+          ls -lah
           
       - uses: actions/upload-artifact@v4
         with:
