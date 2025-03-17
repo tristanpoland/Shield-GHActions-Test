@@ -68,12 +68,15 @@ jobs:
           BOSH_ENVIRONMENT: ${{ secrets.BOSH_ENVIRONMENT }}
           BOSH_CA_CERT: ${{ secrets.BOSH_CA_CERT }}
           KIT_VERSION: ${{ steps.version.outputs.new_version }}
+          BUILD_ROOT: "build"
         run: |
           sudo chmod -R a+rwx ./*
           ./ci/scripts/ensure-tools.sh
           
           genesis compile-kit --force -v "$KIT_VERSION" -n "${{ env.KIT_NAME }}"
-          ls -lah
+          cp ./${{ env.KIT_NAME }}-${{ steps.version.outputs.new_version }}.tar.gz /${{ env.BUILD_ROOT }}/
+          ls -lah ${{ env.BUILD_ROOT }}/
+          echo "Build completed successfully"
           
       - uses: actions/upload-artifact@v4
         with:
