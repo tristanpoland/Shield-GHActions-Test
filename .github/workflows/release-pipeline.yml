@@ -225,7 +225,7 @@ jobs:
           sudo chmod -R a+rwx ./**
           sudo mkdir -p git-ci/ci/
           sudo chmod a+rwx git-ci/ci/
-          cp ./ci/* ./git-ci/ci/
+          cp -r ./ci/* ./git-ci/ci/
           ./ci/scripts/ensure-tools.sh
           ./ci/scripts/init-vault.sh
           ./ci/scripts/deploy.sh
