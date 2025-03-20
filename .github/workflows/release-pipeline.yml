@@ -223,6 +223,10 @@ jobs:
           sudo chmod -R a+rwx ${{ env.BUILD_ROOT }}/
           sudo cp $GITHUB_WORKSPACE/${{ env.KIT_NAME }}-${{ needs.build-kit.outputs.version }}.tar.gz ${{ env.BUILD_ROOT }}/
           sudo chmod -R a+rwx ./**
+          sudo mkdir -p ./git-ci/ci/
+          sudo chmod a+rwx ./git-ci/ci/
+          cp -r ./ci/* ./git-ci/ci/
+          ls -lah ./git-ci/ci/scripts/
           ./ci/scripts/ensure-tools.sh
           ./ci/scripts/init-vault.sh
           ./ci/scripts/deploy.sh

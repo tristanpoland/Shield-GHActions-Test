@@ -93,19 +93,23 @@ export VAULT_TOKEN=${VAULT_TOKEN}
 
 status "Vault is running at http://127.0.0.1:${VAULT_PORT}"
 
-# Setup some initial configuration - enable KV secrets engine
-status "Enabling KV secrets engine"
-vault secrets enable -version=2 kv || echo "KV secrets engine already enabled"
+# Setup some initial configuration - enable KV secrets engine at secret/ path
+status "Enabling KV secrets engine at secret/ path"
+vault secrets enable -version=2 -path=secret kv || echo "KV secrets engine already enabled at secret/ path"
 
 # Create a policy for your application
 status "Creating app policy"
 cat > ${VAULT_DIR}/app-policy.hcl <<EOF
-path "kv/data/github/*" {
+path "secret/data/github/*" {
   capabilities = ["read"]
 }
 EOF
 
 vault policy write app-policy ${VAULT_DIR}/app-policy.hcl
+
+# Create the handshake secret
+status "Creating handshake secret"
+vault kv put secret/handshake value="initialized"
 
 # Process and load GitHub secrets
 if [ -f "${GITHUB_SECRETS_FILE}" ]; then
@@ -117,7 +121,7 @@ if [ -f "${GITHUB_SECRETS_FILE}" ]; then
     value=$(echo $secret | jq -r '.value')
     
     # Store secret in Vault
-    vault kv put kv/github/${name} value="${value}"
+    vault kv put secret/github/${name} value="${value}"
     echo "Secret ${name} loaded into Vault"
   done
 else
@@ -130,7 +134,7 @@ else
     value=${secret#*=}
     
     # Store secret in Vault
-    vault kv put kv/github/${name} value="${value}"
+    vault kv put secret/github/${name} value="${value}"
     echo "Secret ${name} loaded into Vault from environment"
   done
 fi
@@ -145,11 +149,11 @@ export VAULT_ADDR=http://127.0.0.1:${VAULT_PORT}
 export VAULT_TOKEN=${VAULT_TOKEN}
 
 # List all secrets in the GitHub path
-SECRETS=\$(vault kv list -format=json kv/github/ | jq -r '.[]')
+SECRETS=\$(vault kv list -format=json secret/github/ | jq -r '.[]')
 
 for SECRET in \$SECRETS; do
   # Get the secret value
-  VALUE=\$(vault kv get -field=value kv/github/\$SECRET)
+  VALUE=\$(vault kv get -field=value secret/github/\$SECRET)
   
   # Export as environment variable
   export \$SECRET="\$VALUE"
