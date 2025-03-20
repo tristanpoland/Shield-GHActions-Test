@@ -116,8 +116,8 @@ export PATH="$PATH:$CI_PATH/ci/scripts"
 echo $'\n'"Handing off to ${CI_ROOT}/ci/test-deployment..."
 cd "${WORKDIR}"
 
-echo $(ls -lah)
-BOSH=bosh "$CI_PATH/ci/scripts/test-deployment"
+echo $(ls -lah $CI_ROOT/ci/scripts/)
+BOSH=bosh "$CI_ROOT/ci/scripts/test-deployment"
 
 echo
 echo "SUCCESS"
