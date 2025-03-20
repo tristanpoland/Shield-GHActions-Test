@@ -204,7 +204,7 @@ jobs:
       - name: Deploy and Test
         env:
           DEPLOY_ENV: ${{ env.DEPLOY_ENV }}
-          CI_ROOT: ${{ github.workspace }}/${{ env.CI_ROOT }}
+          CI_ROOT: ${{ github.workspace }}/git-ci
           GITHUB_WORKSPACE: ${{ github.workspace }}
           GENESIS_SECRETS_BASE: ${{ secrets.SECRETS_BASE }}
           GENESIS_SECRETS_TOKEN: ${{ secrets.SECRETS_TOKEN }}
