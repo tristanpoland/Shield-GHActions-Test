@@ -117,7 +117,6 @@ echo $'\n'"Handing off to ${CI_PATH}/ci/test-deployment..."
 cd "${WORKDIR}"
 
 echo $(ls -la $CI_PATH)
-
 echo $(ls -lah $CI_PATH/ci/scripts/)
 BOSH=bosh "$CI_PATH/ci/scripts/test-deployment"
 
